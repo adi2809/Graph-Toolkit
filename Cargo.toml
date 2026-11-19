@@ -1,0 +1,29 @@
+[package]
+name = "graph-library"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+description = "Cache-efficient graph algorithms for route finding, matching, and network optimization"
+
+[features]
+default = ["multicommodity"]
+multicommodity = ["dep:microlp"]
+
+[dependencies]
+microlp = { version = "0.8", optional = true }
+
+[[bench]]
+name = "general_matching"
+harness = false
+
+[[bench]]
+name = "weighted_matching"
+harness = false
+
+[[bench]]
+name = "signed_shortest_paths"
+harness = false
+
+[[bench]]
+name = "network_structure"
+harness = false
