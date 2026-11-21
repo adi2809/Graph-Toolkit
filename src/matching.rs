@@ -7,6 +7,7 @@ use crate::connectivity::DisjointSet;
 use crate::{Arc, EdgeId, Graph, GraphError, GraphKind, NONE, NodeId};
 
 mod assignment;
+mod bipartite_walk;
 mod bottleneck;
 mod gabow;
 mod tree_union;
@@ -115,16 +116,11 @@ impl BipartiteGraph {
     /// Randomizes the greedy warm start, then uses Hopcroft–Karp to finish exactly.
     /// The seed makes the chosen matching reproducible.
     pub fn randomized_maximum_matching(&self, seed: u64) -> BipartiteMatching {
-        self.solve(Some(SplitMix64(seed)))
+        self.solve(Some(crate::random::Random(seed)))
     }
 
-    fn solve(&self, mut rng: Option<SplitMix64>) -> BipartiteMatching {
-        let mut matching = BipartiteMatching {
-            left: vec![NONE; self.left_count()],
-            right: vec![NONE; self.right_count],
-            cover: BipartiteVertexCover::default(),
-            len: 0,
-        };
+    fn solve(&self, mut rng: Option<crate::random::Random>) -> BipartiteMatching {
+        let mut matching = self.empty_matching();
         let mut order: Vec<_> = (0..self.left_count())
             .filter(|&u| !self.neighbors(u).is_empty())
             .collect();
@@ -143,14 +139,31 @@ impl BipartiteGraph {
             }
         }
 
+        self.finish_matching(matching, &order)
+    }
+
+    fn empty_matching(&self) -> BipartiteMatching {
+        BipartiteMatching {
+            left: vec![NONE; self.left_count()],
+            right: vec![NONE; self.right_count],
+            cover: Default::default(),
+            len: 0,
+        }
+    }
+
+    fn finish_matching(
+        &self,
+        mut matching: BipartiteMatching,
+        order: &[usize],
+    ) -> BipartiteMatching {
         let mut search = Layers {
             level: vec![NONE; self.left_count()],
             cursor: vec![0; self.left_count()],
             queue: Vec::new(),
             stack: Vec::new(),
         };
-        while let Some(shortest) = search.build(self, &matching, &order) {
-            for &left in &order {
+        while let Some(shortest) = search.build(self, &matching, order) {
+            for &left in order {
                 if matching.left[left] == NONE
                     && search.level[left] == 0
                     && search.augment(self, &mut matching, left, shortest)
@@ -304,26 +317,6 @@ impl Layers {
             }
         }
         false
-    }
-}
-
-struct SplitMix64(u64);
-
-impl SplitMix64 {
-    fn below(&mut self, upper: usize) -> usize {
-        let bound = upper as u64;
-        loop {
-            self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
-            let mut x = self.0;
-            x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-            x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
-            x ^= x >> 31;
-            let product = u128::from(x) * u128::from(bound);
-            let low = product as u64;
-            if low >= bound || low >= bound.wrapping_neg() % bound {
-                return (product >> 64) as usize;
-            }
-        }
     }
 }
 

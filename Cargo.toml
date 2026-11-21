@@ -5,6 +5,8 @@ edition = "2024"
 rust-version = "1.86"
 description = "Cache-efficient graph algorithms for route finding, matching, and network optimization"
 
+exclude = ["/docs/history/NETWORKX-NOTICE.txt", "/.DS_Store"]
+
 [features]
 default = ["multicommodity"]
 multicommodity = ["dep:microlp"]
@@ -26,4 +28,20 @@ harness = false
 
 [[bench]]
 name = "network_structure"
+harness = false
+
+[[bench]]
+name = "obstructions"
+harness = false
+
+[[bench]]
+name = "reachability"
+harness = false
+
+[[bench]]
+name = "flow"
+harness = false
+
+[[bench]]
+name = "flow_core_cycles"
 harness = false

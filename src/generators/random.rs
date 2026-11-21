@@ -143,69 +143,34 @@ pub fn barabasi_albert_graph(
     }
     let mut builder = GraphBuilder::new(n, GraphKind::Undirected);
     let mut rng = Random(seed);
-    let mut fenwick = Fenwick(vec![0; n + 1]);
-    let mut degree = vec![0; n];
-    degree[0] = attachments;
-    fenwick.add(0, attachments, false);
-    for (vertex, value) in degree.iter_mut().enumerate().take(attachments + 1).skip(1) {
-        add(&mut builder, 0, vertex);
-        *value = 1;
-        fenwick.add(vertex, 1, false);
-    }
-    let mut mass = attachments
-        .checked_mul(2)
+    let mut degrees = crate::structures::FenwickTree::new(n);
+    degrees
+        .replace(0, attachments)
         .ok_or(GraphError::GraphSizeOverflow)?;
+    for vertex in 1..=attachments {
+        add(&mut builder, 0, vertex);
+        degrees
+            .replace(vertex, 1)
+            .ok_or(GraphError::GraphSizeOverflow)?;
+    }
     let mut selected = Vec::with_capacity(attachments);
     for vertex in attachments + 1..n {
         for _ in 0..attachments {
-            let target = fenwick.select(rng.below(mass));
-            selected.push(target);
-            mass -= degree[target];
-            fenwick.add(target, degree[target], true);
+            let target = degrees.select(rng.below(degrees.total())).unwrap();
+            let old = degrees.replace(target, 0).unwrap();
+            selected.push((target, old));
             add(&mut builder, vertex, target);
         }
-        for target in selected.drain(..) {
-            degree[target] += 1;
-            mass += degree[target];
-            fenwick.add(target, degree[target], false);
+        for (target, old) in selected.drain(..) {
+            degrees
+                .replace(target, old + 1)
+                .ok_or(GraphError::GraphSizeOverflow)?;
         }
-        degree[vertex] = attachments;
-        mass += attachments;
-        fenwick.add(vertex, attachments, false);
+        degrees
+            .replace(vertex, attachments)
+            .ok_or(GraphError::GraphSizeOverflow)?;
     }
     Ok(builder.build())
-}
-
-struct Fenwick(Vec<usize>);
-
-impl Fenwick {
-    fn add(&mut self, vertex: usize, value: usize, remove: bool) {
-        let mut i = vertex + 1;
-        while let Some(entry) = self.0.get_mut(i) {
-            if remove {
-                *entry -= value;
-            } else {
-                *entry += value;
-            }
-            i += i & i.wrapping_neg();
-        }
-    }
-
-    fn select(&self, mut weight: usize) -> usize {
-        let mut position = 0;
-        let mut bit = 1 << (self.0.len() - 1).ilog2();
-        while bit != 0 {
-            let next = position | bit;
-            if let Some(&mass) = self.0.get(next) {
-                if mass <= weight {
-                    weight -= mass;
-                    position = next;
-                }
-            }
-            bit >>= 1;
-        }
-        position
-    }
 }
 
 /// Uniform labeled tree generated from a uniform Prüfer sequence in O(V).
@@ -395,7 +360,7 @@ pub fn stochastic_block_model(
 }
 
 /// Rewire each clockwise ring-lattice edge independently. Odd degree
-/// parameters use the next lower even degree as in NetworkX.
+/// parameters use the next lower even degree.
 pub fn watts_strogatz_graph(
     n: usize,
     degree: usize,
@@ -662,4 +627,239 @@ pub fn directed_configuration_model(
         add(&mut builder, from, to);
     }
     Ok(builder.build())
+}
+
+/// Clustered configuration model. Each pair gives a vertex's number of
+/// independent-edge stubs and triangle stubs. A triangle stub contributes
+/// two degree incidences. Loops and parallel edges are retained.
+pub fn random_clustered_graph(
+    degrees: &[(usize, usize)],
+    seed: u64,
+) -> Result<Graph<()>, GraphError> {
+    let (single, triangle) = degrees
+        .iter()
+        .try_fold((0_usize, 0_usize), |(s, t), &(ds, dt)| {
+            Some((s.checked_add(ds)?, t.checked_add(dt)?))
+        })
+        .ok_or(GraphError::GraphSizeOverflow)?;
+    if single % 2 != 0 || triangle % 3 != 0 {
+        return Err(GraphError::InvalidModelParameters);
+    }
+    let capacity = (single / 2)
+        .checked_add(triangle)
+        .ok_or(GraphError::GraphSizeOverflow)?;
+    std::alloc::Layout::array::<crate::Edge<()>>(capacity)
+        .map_err(|_| GraphError::GraphSizeOverflow)?;
+    let mut singles = Vec::with_capacity(single);
+    let mut triangles = Vec::with_capacity(triangle);
+    for (u, &(ds, dt)) in degrees.iter().enumerate() {
+        singles.extend(std::iter::repeat_n(u, ds));
+        triangles.extend(std::iter::repeat_n(u, dt));
+    }
+    let mut rng = Random(seed);
+    rng.shuffle(&mut singles);
+    rng.shuffle(&mut triangles);
+    let mut builder =
+        GraphBuilder::with_edge_capacity(degrees.len(), GraphKind::Undirected, capacity);
+    for pair in singles.chunks_exact(2) {
+        add(&mut builder, pair[0], pair[1]);
+    }
+    for group in triangles.chunks_exact(3) {
+        add(&mut builder, group[0], group[1]);
+        add(&mut builder, group[1], group[2]);
+        add(&mut builder, group[2], group[0]);
+    }
+    Ok(builder.build())
+}
+
+/// Directed growing network with linear preferential attachment. Every new
+/// vertex adds one edge to an earlier vertex. Runs in O(V) time.
+pub fn gn_graph(n: usize, seed: u64) -> Graph<()> {
+    let mut builder = GraphBuilder::with_edge_capacity(n, GraphKind::Directed, n.saturating_sub(1));
+    if n >= 2 {
+        add(&mut builder, 1, 0);
+        let mut stubs = vec![0, 1];
+        let mut rng = Random(seed);
+        for node in 2..n {
+            let target = stubs[rng.below(stubs.len())];
+            add(&mut builder, node, target);
+            stubs.extend([node, target]);
+        }
+    }
+    builder.build()
+}
+
+/// Directed growing network with redirection. A sampled attachment can
+/// redirect to its parent's vertex with the given probability.
+pub fn gnr_graph(n: usize, probability: f64, seed: u64) -> Result<Graph<()>, GraphError> {
+    validate_prob(probability)?;
+    let mut builder = GraphBuilder::with_edge_capacity(n, GraphKind::Directed, n.saturating_sub(1));
+    let mut parent = vec![0];
+    let mut rng = Random(seed);
+    for node in 1..n {
+        let mut target = rng.below(node);
+        if target != 0 && rng.uniform() < probability {
+            target = parent[target];
+        }
+        parent.push(target);
+        add(&mut builder, node, target);
+    }
+    Ok(builder.build())
+}
+
+/// Directed growing network with copying. Each new vertex connects to a
+/// sampled older vertex and its out-neighbors. Runs in O(V + E) time.
+pub fn gnc_graph(n: usize, seed: u64) -> Graph<()> {
+    let mut builder = GraphBuilder::new(n, GraphKind::Directed);
+    let mut parent = vec![0];
+    let mut rng = Random(seed);
+    for node in 1..n {
+        let mut target = rng.below(node);
+        parent.push(target);
+        loop {
+            add(&mut builder, node, target);
+            if target == 0 {
+                break;
+            }
+            target = parent[target];
+        }
+    }
+    builder.build()
+}
+
+/// Independent edges between two contiguous parts, using geometric skips.
+/// Left IDs are 0..left and right IDs start at left.
+pub fn bipartite_gnp_random_graph(
+    left: usize,
+    right: usize,
+    probability: f64,
+    seed: u64,
+) -> Result<Graph<()>, GraphError> {
+    validate_prob(probability)?;
+    let n = left
+        .checked_add(right)
+        .ok_or(GraphError::GraphSizeOverflow)?;
+    let pairs = left
+        .checked_mul(right)
+        .ok_or(GraphError::GraphSizeOverflow)?;
+    let mut b = GraphBuilder::new(n, GraphKind::Undirected);
+    sample_pairs(pairs, probability, &mut Random(seed), |i| {
+        add(&mut b, i / right, left + i % right)
+    });
+    Ok(b.build())
+}
+
+/// Union of d independent uniform perfect matchings on two parts of size n.
+/// Parallel edges count toward degree. Sampling costs O(n + nd).
+pub fn random_regular_bipartite_multigraph(
+    n: usize,
+    d: usize,
+    seed: u64,
+) -> Result<Graph<()>, GraphError> {
+    let mut b = GraphBuilder::with_edge_capacity(
+        n.checked_mul(2).ok_or(GraphError::GraphSizeOverflow)?,
+        GraphKind::Undirected,
+        n.checked_mul(d).ok_or(GraphError::GraphSizeOverflow)?,
+    );
+    if n == 0 {
+        return Ok(b.build());
+    }
+    let mut perm: Vec<_> = (n..2 * n).collect();
+    let mut rng = Random(seed);
+    for _ in 0..d {
+        rng.shuffle(&mut perm);
+        for (left, &right) in perm.iter().enumerate() {
+            add(&mut b, left, right);
+        }
+    }
+    Ok(b.build())
+}
+
+/// Binomial random intersection graph. Each vertex independently takes each
+/// attribute with probability p. Sharing any attribute creates one simple edge.
+pub fn random_intersection_graph(
+    n: usize,
+    attributes: usize,
+    p: f64,
+    seed: u64,
+) -> Result<Graph<()>, GraphError> {
+    validate_prob(p)?;
+    if attributes == 0 || p == 0.0 || n < 2 {
+        return Ok(empty_graph(n, GraphKind::Undirected));
+    }
+    if p == 1.0 {
+        return complete_graph(n, GraphKind::Undirected);
+    }
+    let mut b = GraphBuilder::new(n, GraphKind::Undirected);
+    let mut seen = HashSet::new();
+    let mut members = Vec::new();
+    let mut rng = Random(seed);
+    for _ in 0..attributes {
+        members.clear();
+        sample_pairs(n, p, &mut rng, |v| {
+            for &u in &members {
+                if seen.insert((u, v)) {
+                    add(&mut b, u, v);
+                }
+            }
+            members.push(v);
+        });
+    }
+    Ok(b.build())
+}
+
+/// Uniform simple labelled d-regular graph, conditional on returning Some.
+/// Rejection of loops and repeated pairs from a uniformly shuffled stub
+/// pairing is efficient for small degrees. Dense graphs use complements.
+/// None means the trial budget expired. Infeasible parameters return an error.
+pub fn random_regular_graph(
+    n: usize,
+    d: usize,
+    seed: u64,
+    trials: usize,
+) -> Result<Option<Graph<()>>, GraphError> {
+    if d > n.saturating_sub(1) || (n % 2 == 1 && d % 2 == 1) {
+        return Err(GraphError::InvalidModelParameters);
+    }
+    if d == 0 {
+        return Ok(Some(empty_graph(n, GraphKind::Undirected)));
+    }
+    if d == n - 1 {
+        return complete_graph(n, GraphKind::Undirected).map(Some);
+    }
+    if trials == 0 {
+        return Ok(None);
+    }
+    let inverse = d > n - 1 - d;
+    let sparse = d.min(n - 1 - d);
+    let size = n.checked_mul(sparse).ok_or(GraphError::GraphSizeOverflow)?;
+    let mut stubs: Vec<_> = (0..size).map(|i| i / sparse).collect();
+    let mut pairs = HashSet::with_capacity(size / 2);
+    let mut rng = Random(seed);
+    for _ in 0..trials {
+        rng.shuffle(&mut stubs);
+        pairs.clear();
+        if !stubs
+            .chunks_exact(2)
+            .all(|p| p[0] != p[1] && pairs.insert((p[0].min(p[1]), p[0].max(p[1]))))
+        {
+            continue;
+        }
+        let mut b = GraphBuilder::new(n, GraphKind::Undirected);
+        if inverse {
+            for u in 0..n {
+                for v in u + 1..n {
+                    if !pairs.contains(&(u, v)) {
+                        add(&mut b, u, v);
+                    }
+                }
+            }
+        } else {
+            for p in stubs.chunks_exact(2) {
+                add(&mut b, p[0], p[1]);
+            }
+        }
+        return Ok(Some(b.build()));
+    }
+    Ok(None)
 }

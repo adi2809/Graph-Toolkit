@@ -169,3 +169,39 @@ pub fn minimum_bottleneck_arborescence<W: Copy + Ord>(
         .collect();
     Ok(Some(BottleneckTree { edges, bottleneck }))
 }
+
+/// Wilson's loop-erased random walks, with one root per connected component.
+/// Samples a uniform spanning tree independently in each component. Parallel
+/// edges are distinct choices. Payloads are ignored. Returns original edge IDs.
+pub fn random_spanning_forest<W>(graph: &Graph<W>, seed: u64) -> Result<Vec<EdgeId>, GraphError> {
+    let components = super::connected_components(graph)?;
+    let mut tree = vec![false; graph.node_count()];
+    let mut rooted = vec![false; components.count];
+    for (v, &c) in components.component_of.iter().enumerate() {
+        if !rooted[c] {
+            tree[v] = true;
+            rooted[c] = true;
+        }
+    }
+    let mut rng = crate::random::Random(seed);
+    let mut successor = vec![None; graph.node_count()];
+    let mut result = Vec::with_capacity(graph.node_count() - components.count);
+    for root in graph.nodes() {
+        let mut v = root;
+        while !tree[v] {
+            let neighbors = graph.out(v);
+            let arc = neighbors[rng.below(neighbors.len())];
+            successor[v] = Some(arc);
+            v = arc.node;
+        }
+        // Last exits erase every cycle in the walk, including self-loops.
+        v = root;
+        while !tree[v] {
+            tree[v] = true;
+            let arc = successor[v].unwrap();
+            result.push(arc.edge);
+            v = arc.node;
+        }
+    }
+    Ok(result)
+}

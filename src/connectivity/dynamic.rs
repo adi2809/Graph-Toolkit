@@ -104,11 +104,7 @@ pub fn offline_dynamic_connectivity(
         add_lifetime(&mut tree, start + base, events.len() + base, edge);
     }
     let mut answers = Vec::new();
-    let mut sets = RollbackSets {
-        parent: vec![-1; n],
-        history: Vec::new(),
-        count: n,
-    };
+    let mut sets = RollbackUnionFind::new(n);
     process(&tree, events, base, 1, &mut sets, &mut answers);
     Ok(answers)
 }
@@ -138,10 +134,10 @@ fn process(
     events: &[ConnectivityEvent],
     base: usize,
     node: usize,
-    sets: &mut RollbackSets,
+    sets: &mut RollbackUnionFind,
     answers: &mut Vec<ConnectivityAnswer>,
 ) {
-    let checkpoint = sets.history.len();
+    let checkpoint = sets.checkpoint();
     for &(a, b) in &tree[node] {
         sets.union(a, b);
     }
@@ -164,21 +160,36 @@ fn process(
     sets.rollback(checkpoint);
 }
 
-struct RollbackSets {
+/// Union by size with O(log n) finds and reversible merges. A checkpoint
+/// denotes a prefix of this instance's current merge history.
+pub struct RollbackUnionFind {
     parent: Vec<isize>,
     history: Vec<(usize, usize, isize)>,
     count: usize,
 }
 
-impl RollbackSets {
-    fn find(&self, mut node: usize) -> usize {
+impl RollbackUnionFind {
+    pub fn new(n: usize) -> Self {
+        Self {
+            parent: vec![-1; n],
+            history: Vec::new(),
+            count: n,
+        }
+    }
+    pub fn component_count(&self) -> usize {
+        self.count
+    }
+    pub fn checkpoint(&self) -> usize {
+        self.history.len()
+    }
+    pub fn find(&self, mut node: usize) -> usize {
         while self.parent[node] >= 0 {
             node = self.parent[node] as usize;
         }
         node
     }
 
-    fn union(&mut self, a: usize, b: usize) {
+    pub fn union(&mut self, a: usize, b: usize) {
         let (mut a, mut b) = (self.find(a), self.find(b));
         if a == b {
             return;
@@ -192,7 +203,9 @@ impl RollbackSets {
         self.count -= 1;
     }
 
-    fn rollback(&mut self, checkpoint: usize) {
+    /// Undoes all merges after a checkpoint on the current history. A depth
+    /// greater than the current depth leaves the sets unchanged.
+    pub fn rollback(&mut self, checkpoint: usize) {
         while self.history.len() > checkpoint {
             let (a, b, size) = self.history.pop().unwrap();
             self.parent[a] -= size;

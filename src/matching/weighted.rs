@@ -1,95 +1,84 @@
-//! Weighted primal-dual blossom matching on dense vertex and edge IDs.
-//!
-//! Blossom expansion and lifting follow the reference algorithms in NetworkX
-//! matching.py (Joris van Rantwijk and the NetworkX developers).
-//! See LICENSE.networkx for the applicable BSD-3-Clause notice.
+//! Edmonds' primal-dual algorithm on the quotient by the current odd sets.
+//! Each ring stores only its cyclic edges. Internal matches are materialized
+//! when the ring opens, so augmentation touches only the quotient forest.
 
 use super::{GeneralMatching, VACANT, maximum_general_matching_gabow};
 use crate::connectivity::DisjointSet;
-use crate::{EdgeId, Graph, GraphError, GraphKind, NONE, NodeId};
+use crate::queue::IndexedHeap;
+use crate::{EdgeId, Graph, GraphError, GraphKind, NONE};
 
-/// An exact integer objective value and a matching in the original graph.
 #[derive(Clone, Debug)]
 pub struct WeightedMatching {
     pub matching: GeneralMatching,
     pub total_weight: i128,
 }
 
-/// Maximum-weight matching in an undirected graph. Set `max_cardinality` to
-/// maximize the number of edges first, then break ties by total weight.
-/// Without this option the empty matching is eligible and zero-weight edges
-/// are omitted. Self-loops are ignored. Parallel edges retain original IDs.
-///
-/// Uses a sparse primal-dual blossom implementation with O(V³ + E) worst-case
-/// time after coalescing parallel edges. Components are solved independently.
+/// Maximizes total weight, optionally prioritizing cardinality. Pure weight
+/// optimization excludes nonpositive edges. Returned IDs belong to the input.
 pub fn maximum_weight_matching(
     graph: &Graph<i64>,
     max_cardinality: bool,
 ) -> Result<WeightedMatching, GraphError> {
-    weighted_matching(graph, false, max_cardinality)
+    optimize(graph, max_cardinality, false)
 }
 
-/// Minimum cost among all maximum-cardinality matchings.
+/// Minimizes total weight among maximum-cardinality matchings.
 pub fn minimum_cost_matching(graph: &Graph<i64>) -> Result<WeightedMatching, GraphError> {
-    weighted_matching(graph, true, true)
+    optimize(graph, true, true)
 }
 
-/// Minimum-cost matching that covers every vertex, or `None` if infeasible.
 pub fn minimum_cost_perfect_matching(
     graph: &Graph<i64>,
 ) -> Result<Option<WeightedMatching>, GraphError> {
     graph.require(GraphKind::Undirected)?;
-    if graph.node_count() % 2 != 0 {
+    if graph.node_count() % 2 == 1 {
         return Ok(None);
     }
-    let matching = minimum_cost_matching(graph)?;
-    Ok((2 * matching.matching.len() == graph.node_count()).then_some(matching))
+    let result = minimum_cost_matching(graph)?;
+    Ok((result.matching.len() * 2 == graph.node_count()).then_some(result))
 }
 
-#[derive(Clone, Copy)]
-struct Score {
-    value: i128,
-    original: EdgeId,
-}
-
-fn weighted_matching(
+fn optimize(
     graph: &Graph<i64>,
+    cardinality: bool,
     minimize: bool,
-    max_cardinality: bool,
 ) -> Result<WeightedMatching, GraphError> {
     graph.require(GraphKind::Undirected)?;
     let n = graph.node_count();
+    let eligible = |e: &crate::Edge<i64>| e.from != e.to && (cardinality || e.weight > 0);
     let mut sets = DisjointSet::new(n);
-    let mut best = vec![NONE; n];
-    let mut neighbors = Vec::new();
-    let mut selected = Vec::new();
-    for node in 0..n {
-        for arc in graph.out(node) {
-            if arc.node <= node || (!max_cardinality && graph.edges()[arc.edge].weight <= 0) {
-                continue;
+    let mut groups = vec![Vec::new(); n];
+    // Keep a single optimal representative of each unordered pair. The first
+    // edge wins ties, independently of hash iteration order.
+    let mut representatives = Vec::<EdgeId>::new();
+    let mut positions = std::collections::HashMap::new();
+    for (id, e) in graph
+        .edges()
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| eligible(e))
+    {
+        let pair = (e.from.min(e.to), e.from.max(e.to));
+        match positions.entry(pair) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(representatives.len());
+                representatives.push(id);
+                sets.union(e.from, e.to);
             }
-            let previous = best[arc.node];
-            if previous == NONE {
-                neighbors.push(arc.node);
-                best[arc.node] = arc.edge;
-            } else {
-                let old_weight = graph.edges()[previous].weight;
-                let new_weight = graph.edges()[arc.edge].weight;
-                if (minimize && new_weight < old_weight) || (!minimize && new_weight > old_weight) {
-                    best[arc.node] = arc.edge;
+            std::collections::hash_map::Entry::Occupied(slot) => {
+                let best = &mut representatives[*slot.get()];
+                let old = graph.edges()[*best].weight;
+                if (minimize && e.weight < old) || (!minimize && e.weight > old) {
+                    *best = id;
                 }
             }
         }
-        for neighbor in neighbors.drain(..) {
-            sets.union(node, neighbor);
-            selected.push(std::mem::replace(&mut best[neighbor], NONE));
-        }
     }
-
-    let mut components = vec![Vec::new(); n];
-    for id in selected {
-        components[sets.find(graph.edges()[id].from)].push(id);
+    drop(positions);
+    for id in representatives {
+        groups[sets.find(graph.edges()[id].from)].push(id);
     }
+    let mut local = vec![NONE; n];
     let mut result = WeightedMatching {
         matching: GeneralMatching {
             mates: vec![VACANT; n],
@@ -97,702 +86,453 @@ fn weighted_matching(
         },
         total_weight: 0,
     };
-    let mut local = best;
-    let mut vertices = Vec::new();
-    for edges in components.into_iter().filter(|edges| !edges.is_empty()) {
-        if edges.len() == 1 {
-            add_result(graph, &mut result, edges[0]);
-            continue;
-        }
-        vertices.clear();
-        for &id in &edges {
-            let edge = &graph.edges()[id];
-            for node in [edge.from, edge.to] {
-                if local[node] == NONE {
-                    local[node] = vertices.len();
-                    vertices.push(node);
+    for ids in groups.into_iter().filter(|g| !g.is_empty()) {
+        let mut count = 0;
+        let mut arcs = Vec::with_capacity(ids.len());
+        for &id in &ids {
+            let e = graph.edges()[id];
+            for v in [e.from, e.to] {
+                if local[v] == NONE {
+                    local[v] = count;
+                    count += 1;
                 }
             }
+            let w = i128::from(e.weight);
+            arcs.push(Link {
+                u: local[e.from],
+                v: local[e.to],
+                profit: if minimize { -w } else { w },
+            });
         }
-        let first = graph.edges()[edges[0]].weight;
-        let mut uniform = true;
-        let mut build = Graph::builder(vertices.len(), GraphKind::Undirected);
-        for id in edges {
-            let edge = &graph.edges()[id];
-            uniform &= edge.weight == first;
-            let value = i128::from(edge.weight);
-            let score = Score {
-                original: id,
-                value: if minimize { -value } else { value },
-            };
-            build
-                .add_edge(local[edge.from], local[edge.to], score)
-                .unwrap();
-        }
-        let component = build.build();
-        if uniform {
-            let matching = maximum_general_matching_gabow(&component).unwrap();
-            for id in matching.edges() {
-                add_result(graph, &mut result, component.edges()[id].weight.original);
+        let selected = if arcs.iter().all(|a| a.profit == arcs[0].profit) {
+            let mut g = Graph::builder(count, GraphKind::Undirected);
+            for a in &arcs {
+                g.add_edge(a.u, a.v, ())?;
             }
+            maximum_general_matching_gabow(&g.build())?
+                .edges()
+                .collect()
         } else {
-            let mates = WeightedSearch::new(&component, max_cardinality).solve();
-            for (node, end) in mates.into_iter().enumerate() {
-                if end != NONE && node < endpoint(&component, end ^ 1) {
-                    add_result(
-                        graph,
-                        &mut result,
-                        component.edges()[end / 2].weight.original,
-                    );
-                }
-            }
+            Quotient::new(count, &arcs).solve(cardinality)
+        };
+        for i in selected {
+            let id = ids[i];
+            let e = graph.edges()[id];
+            result.matching.pair(e.from, e.to, id);
+            result.matching.len += 1;
+            result.total_weight += i128::from(e.weight);
         }
     }
     Ok(result)
 }
 
-fn add_result(graph: &Graph<i64>, result: &mut WeightedMatching, id: EdgeId) {
-    let edge = &graph.edges()[id];
-    result.matching.pair(edge.from, edge.to, id);
-    result.matching.len += 1;
-    result.total_weight += i128::from(edge.weight);
-}
-
-// End 2e names the source of edge e and 2e+1 names its target. An oriented
-// edge is represented by its starting end, so XOR 1 reverses its orientation.
-fn endpoint(graph: &Graph<Score>, end: usize) -> NodeId {
-    let edge = &graph.edges()[end / 2];
-    if end & 1 == 0 { edge.from } else { edge.to }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum Label {
-    #[default]
-    Free,
-    Outer,
-    Inner,
-    Visited,
-}
-
-struct Block {
-    parent: usize,
-    base: NodeId,
-    label: Label,
-    entry: usize,
-    best: EdgeId,
-    dual: i128,
-}
-
-impl Block {
-    fn new(base: NodeId, dual: i128) -> Self {
-        Self {
-            parent: NONE,
-            base,
-            label: Label::Free,
-            entry: NONE,
-            best: NONE,
-            dual,
-        }
-    }
-}
-
-#[derive(Default)]
-struct Cycle {
-    children: Vec<usize>,
-    exits: Vec<usize>,
-    /// Least-slack edges to distinct neighboring outer blocks in this stage.
-    cache: Vec<EdgeId>,
-    cached: bool,
-}
-
-impl Cycle {
-    fn step(&self, index: usize, forward: bool) -> usize {
-        if forward {
-            (index + 1) % self.children.len()
-        } else {
-            index.checked_sub(1).unwrap_or(self.children.len() - 1)
-        }
-    }
-
-    fn exit(&self, index: usize, forward: bool) -> usize {
-        if forward {
-            self.exits[index]
-        } else {
-            self.exits[self.step(index, false)] ^ 1
-        }
-    }
-}
-
-enum Edit {
-    Start(usize, NodeId),
-    Walk {
-        block: usize,
-        cursor: usize,
-        start: usize,
-        vertex: NodeId,
-    },
-    Pair(usize),
-}
-
 #[derive(Clone, Copy)]
-enum Event {
-    Stop,
-    Tighten(EdgeId),
-    Expand(usize),
+struct Link {
+    u: usize,
+    v: usize,
+    profit: i128,
 }
 
-struct WeightedSearch<'a> {
-    graph: &'a Graph<Score>,
-    n: usize,
-    cardinality_first: bool,
-    blocks: Vec<Block>,
-    cycles: Vec<Cycle>,
-    top: Vec<usize>,
-    mate: Vec<usize>,
-    allowed: Vec<bool>,
-    queue: Vec<NodeId>,
-    free_blocks: Vec<usize>,
-    // Work buffers for nested blossoms, contraction, and iterative lifting.
-    leaves: Vec<NodeId>,
-    visit: Vec<usize>,
-    trail: Vec<usize>,
-    expansion: Vec<usize>,
-    edits: Vec<Edit>,
-    best_to: Vec<EdgeId>,
-    touched: Vec<usize>,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Forest {
+    Outside,
+    Even,
+    Odd(EdgeId),
 }
 
-impl<'a> WeightedSearch<'a> {
-    fn new(graph: &'a Graph<Score>, cardinality_first: bool) -> Self {
-        let n = graph.node_count();
-        let maximum = graph
-            .edges()
-            .iter()
-            .map(|edge| edge.weight.value)
-            .max()
-            .unwrap_or(0)
-            .max(0);
-        let blocks = (0..n)
-            .map(|node| Block::new(node, maximum))
-            .chain((0..n).map(|_| Block::new(NONE, 0)))
-            .collect();
+struct Part {
+    live: bool, // currently a vertex of the quotient
+    forest: Forest,
+    mate: Option<EdgeId>,
+    // (child, edge leading to the next child), starting at the original base.
+    ring: Vec<(usize, EdgeId)>,
+    price: i128,
+}
+
+impl Part {
+    fn singleton() -> Self {
         Self {
-            graph,
-            n,
-            cardinality_first,
-            blocks,
-            cycles: (0..n).map(|_| Cycle::default()).collect(),
-            top: (0..n).collect(),
-            mate: vec![NONE; n],
-            allowed: vec![false; graph.edge_count()],
-            queue: Vec::new(),
-            free_blocks: (n..2 * n).collect(),
-            leaves: Vec::new(),
-            visit: Vec::new(),
-            trail: Vec::new(),
-            expansion: Vec::new(),
-            edits: Vec::new(),
-            best_to: vec![NONE; 2 * n],
-            touched: Vec::new(),
+            live: true,
+            forest: Forest::Outside,
+            mate: None,
+            ring: vec![],
+            price: 0,
+        }
+    }
+}
+
+enum Event {
+    End,
+    Edge(usize, EdgeId),
+    Open(usize),
+}
+
+struct Quotient<'a> {
+    edges: &'a [Link],
+    owner: Vec<usize>,
+    potential: Vec<i128>, // doubled vertex dual
+    parts: Vec<Part>,
+    recycled: Vec<usize>,
+    incident: Vec<Vec<EdgeId>>,
+    // Predicted absolute time at which an inter-part edge becomes tight.
+    // Obsolete entries are checked against their current quotient endpoints.
+    agenda: IndexedHeap<(i128, bool)>,
+    clock: i128,
+}
+
+impl<'a> Quotient<'a> {
+    fn new(n: usize, edges: &'a [Link]) -> Self {
+        let initial = edges.iter().map(|e| e.profit).max().unwrap().max(0);
+        let mut incident = vec![Vec::new(); n];
+        for (id, e) in edges.iter().enumerate() {
+            incident[e.u].push(id);
+            incident[e.v].push(id);
+        }
+        Self {
+            edges,
+            incident,
+
+            agenda: IndexedHeap::new(edges.len()),
+            clock: 0,
+            owner: (0..n).collect(),
+            potential: vec![initial; n],
+            parts: (0..n).map(|_| Part::singleton()).collect(),
+            recycled: vec![],
         }
     }
 
-    fn solve(mut self) -> Vec<usize> {
-        while self.augment_stage() {
-            for block in self.n..2 * self.n {
-                let state = &self.blocks[block];
-                if state.base != NONE
-                    && state.parent == NONE
-                    && state.label == Label::Outer
-                    && state.dual == 0
+    fn other(&self, id: EdgeId, part: usize) -> usize {
+        let e = self.edges[id];
+        if self.owner[e.u] == part {
+            self.owner[e.v]
+        } else {
+            self.owner[e.u]
+        }
+    }
+
+    fn solve(mut self, cardinality: bool) -> Vec<EdgeId> {
+        'stages: loop {
+            // Disjoint tight edges between exposed parts can be taken together.
+            for (id, e) in self.edges.iter().enumerate() {
+                let (a, b) = (self.owner[e.u], self.owner[e.v]);
+                if a != b
+                    && self.parts[a].mate.is_none()
+                    && self.parts[b].mate.is_none()
+                    && self.potential[e.u] + self.potential[e.v] == 2 * e.profit
                 {
-                    self.expand(block, true);
+                    self.parts[a].mate = Some(id);
+                    self.parts[b].mate = Some(id);
+                }
+            }
+            for p in self.parts.iter_mut().filter(|p| p.live) {
+                p.forest = if p.mate.is_none() {
+                    Forest::Even
+                } else {
+                    Forest::Outside
+                };
+            }
+            if !self.parts.iter().any(|p| p.live && p.mate.is_none()) {
+                break;
+            }
+            self.clock = 0;
+            let initial = (0..self.edges.len())
+                .filter_map(|id| self.prediction(id).map(|key| (key, id)))
+                .collect();
+            self.agenda.rebuild(initial);
+            loop {
+                let (step, event) = self.next_event(cardinality);
+                if matches!(event, Event::End) {
+                    break 'stages;
+                }
+                if step != 0 {
+                    self.advance(step);
+                }
+                match event {
+                    Event::Open(p) => self.open(p, true),
+                    Event::Edge(a, id) => {
+                        let b = self.other(id, a);
+                        if self.parts[b].forest == Forest::Outside {
+                            self.parts[b].forest = Forest::Odd(id);
+                            let partner = self.other(self.parts[b].mate.unwrap(), b);
+                            self.parts[partner].forest = Forest::Even;
+                            self.reschedule(partner);
+                        } else if self.join(a, b, id) {
+                            break;
+                        }
+                    }
+                    Event::End => unreachable!(),
                 }
             }
         }
-        self.mate
-    }
-
-    fn source(&self, end: usize) -> NodeId {
-        endpoint(self.graph, end)
-    }
-
-    fn target(&self, end: usize) -> NodeId {
-        self.source(end ^ 1)
-    }
-
-    fn slack(&self, id: EdgeId) -> i128 {
-        let edge = &self.graph.edges()[id];
-        self.blocks[edge.from].dual + self.blocks[edge.to].dual - 2 * edge.weight.value
-    }
-
-    fn improves(&self, previous: EdgeId, slack: i128) -> bool {
-        previous == NONE || slack < self.slack(previous)
-    }
-
-    fn list_leaves(&mut self, block: usize) {
-        self.leaves.clear();
-        self.visit.push(block);
-        while let Some(item) = self.visit.pop() {
-            if item < self.n {
-                self.leaves.push(item);
-            } else {
-                self.visit
-                    .extend(self.cycles[item - self.n].children.iter().rev());
-            }
+        let mut pending: Vec<_> = (self.owner.len()..self.parts.len())
+            .filter(|&p| self.parts[p].live)
+            .collect();
+        while let Some(p) = pending.pop() {
+            pending.extend(
+                self.parts[p]
+                    .ring
+                    .iter()
+                    .map(|x| x.0)
+                    .filter(|&c| c >= self.owner.len()),
+            );
+            self.open(p, false);
         }
+        (0..self.owner.len())
+            .filter_map(|v| self.parts[v].mate.filter(|&id| self.edges[id].u == v))
+            .collect()
     }
 
-    fn label(&mut self, vertex: NodeId, label: Label, entry: usize) {
-        let block = self.top[vertex];
-        for id in [vertex, block] {
-            self.blocks[id].label = label;
-            self.blocks[id].entry = entry;
-            self.blocks[id].best = NONE;
+    // Only edges between quotient vertices participate. Descendant odd-set
+    // prices cancel from their reduced cost. Ties can be resolved arbitrarily.
+    fn edge_event(&self, id: EdgeId) -> Option<(i128, usize)> {
+        let e = self.edges[id];
+        let (mut a, mut b) = (self.owner[e.u], self.owner[e.v]);
+        if a == b {
+            return None;
         }
+        if self.parts[a].forest != Forest::Even {
+            std::mem::swap(&mut a, &mut b);
+        }
+        if self.parts[a].forest != Forest::Even {
+            return None;
+        }
+        let slack = self.potential[e.u] + self.potential[e.v] - 2 * e.profit;
+        let delay = match self.parts[b].forest {
+            Forest::Odd(_) => return None,
+            Forest::Outside => slack,
+            Forest::Even => {
+                debug_assert_eq!(slack % 2, 0);
+                slack / 2
+            }
+        };
+        Some((self.clock + delay, a))
     }
 
-    fn outer(&mut self, vertex: NodeId, entry: usize) {
-        self.label(vertex, Label::Outer, entry);
-        self.list_leaves(self.top[vertex]);
-        self.queue.extend_from_slice(&self.leaves);
+    fn prediction(&self, id: EdgeId) -> Option<(i128, bool)> {
+        let (time, a) = self.edge_event(id)?;
+        let b = self.other(id, a);
+        // An edge directly joining two exposed roots immediately augments.
+        let needs_search = self.parts[a].mate.is_some() || self.parts[b].mate.is_some();
+        Some((time, needs_search))
     }
 
-    fn inner(&mut self, vertex: NodeId, entry: usize) {
-        self.label(vertex, Label::Inner, entry);
-        let base = self.blocks[self.top[vertex]].base;
-        let matched = self.mate[base];
-        self.outer(self.target(matched), matched);
-    }
-
-    fn augment_stage(&mut self) -> bool {
-        for block in &mut self.blocks {
-            block.label = Label::Free;
-            block.entry = NONE;
-            block.best = NONE;
-        }
-        for cycle in &mut self.cycles {
-            cycle.cache.clear();
-            cycle.cached = false;
-        }
-        self.allowed.fill(false);
-        self.queue.clear();
-        for node in 0..self.n {
-            if self.mate[node] == NONE && self.blocks[self.top[node]].label == Label::Free {
-                self.outer(node, NONE);
-            }
-        }
-        // Every augmenting search alternates tight-edge scans and dual updates.
-        loop {
-            while let Some(node) = self.queue.pop() {
-                if self.scan(node) {
-                    return true;
-                }
-            }
-            let Some((delta, event)) = self.next_event() else {
-                return false;
-            };
-            if matches!(event, Event::Stop) {
-                return false;
-            }
-            if delta != 0 {
-                self.adjust_duals(delta);
-            }
-            match event {
-                Event::Tighten(id) => {
-                    self.allowed[id] = true;
-                    let edge = &self.graph.edges()[id];
-                    let node = if self.blocks[self.top[edge.from]].label == Label::Outer {
-                        edge.from
-                    } else {
-                        edge.to
-                    };
-                    self.queue.push(node);
-                }
-                Event::Expand(block) => self.expand(block, false),
-                Event::Stop => unreachable!(),
-            }
-        }
-    }
-
-    fn scan(&mut self, node: NodeId) -> bool {
-        for &arc in self.graph.out(node) {
-            let other = arc.node;
-            let left = self.top[node];
-            let right = self.top[other];
-            if left == right {
+    fn reschedule(&mut self, part: usize) {
+        let mut stack = vec![part];
+        while let Some(p) = stack.pop() {
+            if p >= self.owner.len() {
+                stack.extend(self.parts[p].ring.iter().map(|x| x.0));
                 continue;
             }
-            let reduced = if self.allowed[arc.edge] {
-                0
-            } else {
-                self.slack(arc.edge)
-            };
-            if reduced <= 0 {
-                self.allowed[arc.edge] = true;
-                let edge = &self.graph.edges()[arc.edge];
-                let end = 2 * arc.edge + usize::from(edge.to == node);
-                match self.blocks[right].label {
-                    Label::Free => self.inner(other, end),
-                    Label::Outer => {
-                        if let Some(base) = self.common_base(node, other) {
-                            self.contract(base, end);
-                        } else {
-                            self.augment(end);
-                            return true;
-                        }
-                    }
-                    Label::Inner => {
-                        if self.blocks[other].label == Label::Free {
-                            self.blocks[other].label = Label::Inner;
-                            self.blocks[other].entry = end;
-                        }
-                    }
-                    Label::Visited => unreachable!(),
+            for &id in &self.incident[p] {
+                if let Some(event) = self.prediction(id) {
+                    self.agenda.offer(id, event);
                 }
-            } else if self.blocks[right].label == Label::Outer {
-                if self.improves(self.blocks[left].best, reduced) {
-                    self.blocks[left].best = arc.edge;
-                }
-            } else if self.blocks[other].label == Label::Free
-                && self.improves(self.blocks[other].best, reduced)
-            {
-                self.blocks[other].best = arc.edge;
             }
+        }
+    }
+
+    fn next_event(&mut self, cardinality: bool) -> (i128, Event) {
+        let mut delta = i128::MAX;
+        if !cardinality {
+            for (v, &p) in self.owner.iter().enumerate() {
+                if self.parts[p].forest == Forest::Even {
+                    delta = delta.min(self.potential[v]);
+                }
+            }
+        }
+        let mut event = Event::End;
+        for (p, part) in self.parts.iter().enumerate().skip(self.owner.len()) {
+            if part.live && matches!(part.forest, Forest::Odd(_)) && part.price < delta {
+                delta = part.price;
+                event = Event::Open(p);
+            }
+        }
+        while let Some(((time, _), id)) = self.agenda.peek() {
+            if time - self.clock >= delta {
+                break;
+            }
+            self.agenda.pop();
+            if let Some((current, a)) = self.edge_event(id) {
+                if current == time {
+                    return (time - self.clock, Event::Edge(a, id));
+                }
+                self.agenda.decrease(id, self.prediction(id).unwrap());
+            }
+        }
+        (delta, event)
+    }
+
+    fn advance(&mut self, delta: i128) {
+        self.clock += delta;
+        for (y, &p) in self.potential.iter_mut().zip(&self.owner) {
+            match self.parts[p].forest {
+                Forest::Even => *y -= delta,
+                Forest::Odd(_) => *y += delta,
+                _ => {}
+            }
+        }
+        for p in self
+            .parts
+            .iter_mut()
+            .skip(self.owner.len())
+            .filter(|p| p.live)
+        {
+            match p.forest {
+                Forest::Even => p.price += delta,
+                Forest::Odd(_) => p.price -= delta,
+                _ => {}
+            }
+        }
+    }
+
+    // Trace the alternating path to its exposed root in the quotient.
+    fn ancestors(&self, mut v: usize) -> Vec<usize> {
+        let mut path = vec![v];
+        while let Some(id) = self.parts[v].mate {
+            let odd = self.other(id, v);
+            let Forest::Odd(incoming) = self.parts[odd].forest else {
+                unreachable!()
+            };
+            v = self.other(incoming, odd);
+            path.extend([odd, v]);
+        }
+        path
+    }
+
+    fn forest_edge(&self, child: usize) -> EdgeId {
+        match self.parts[child].forest {
+            Forest::Odd(e) => e,
+            _ => self.parts[child].mate.unwrap(),
+        }
+    }
+
+    fn join(&mut self, a: usize, b: usize, bridge: EdgeId) -> bool {
+        let mut left = self.ancestors(a);
+        let mut right = self.ancestors(b);
+        if left.last() != right.last() {
+            for path in [&left, &right] {
+                self.parts[path[0]].mate = Some(bridge);
+                for pair in path[1..].chunks_exact(2) {
+                    let edge = self.forest_edge(pair[0]);
+                    for &p in pair {
+                        self.parts[p].mate = Some(edge);
+                    }
+                }
+            }
+            return true;
+        }
+        let mut base = NONE;
+        while left.last().is_some() && left.last() == right.last() {
+            base = left.pop().unwrap();
+            right.pop();
+        }
+        let mut ring = Vec::new();
+        let mut previous = base;
+        for &p in left.iter().rev() {
+            ring.push((previous, self.forest_edge(p)));
+            previous = p;
+        }
+        ring.push((previous, bridge));
+        for &p in &right {
+            ring.push((p, self.forest_edge(p)));
+        }
+        let id = self.recycled.pop().unwrap_or(self.parts.len());
+        // Reassign only leaves of the contracted subtrees.
+        for &(child, _) in &ring {
+            self.parts[child].live = false;
+            self.assign(child, id);
+        }
+        let changed: Vec<_> = ring
+            .iter()
+            .map(|x| x.0)
+            .filter(|&c| self.parts[c].forest != Forest::Even)
+            .collect();
+        let part = Part {
+            live: true,
+            forest: Forest::Even,
+            mate: self.parts[base].mate,
+            ring,
+            price: 0,
+        };
+        if id == self.parts.len() {
+            self.parts.push(part);
+        } else {
+            self.parts[id] = part;
+        }
+        for child in changed {
+            self.reschedule(child);
         }
         false
     }
 
-    fn common_base(&mut self, mut a: NodeId, mut b: NodeId) -> Option<NodeId> {
-        let mut base = None;
-        while a != NONE {
-            let block = self.top[a];
-            if self.blocks[block].label == Label::Visited {
-                base = Some(self.blocks[block].base);
-                break;
-            }
-            self.blocks[block].label = Label::Visited;
-            self.trail.push(block);
-            let previous = self.blocks[block].entry;
-            a = if previous == NONE {
-                NONE
+    fn assign(&mut self, child: usize, owner: usize) {
+        let mut stack = vec![child];
+        while let Some(p) = stack.pop() {
+            if p < self.owner.len() {
+                self.owner[p] = owner;
             } else {
-                let inner = self.top[self.source(previous)];
-                self.source(self.blocks[inner].entry)
-            };
-            if b != NONE {
-                std::mem::swap(&mut a, &mut b);
-            }
-        }
-        for item in self.trail.drain(..) {
-            self.blocks[item].label = Label::Outer;
-        }
-        base
-    }
-
-    fn contract(&mut self, base: NodeId, join: usize) {
-        let block = self.free_blocks.pop().unwrap();
-        let base_child = self.top[base];
-        let mut left = self.top[self.source(join)];
-        let mut right = self.top[self.target(join)];
-        let mut cycle = std::mem::take(&mut self.cycles[block - self.n]);
-        while left != base_child {
-            self.blocks[left].parent = block;
-            cycle.children.push(left);
-            let entry = self.blocks[left].entry;
-            cycle.exits.push(entry);
-            left = self.top[self.source(entry)];
-        }
-        self.blocks[base_child].parent = block;
-        cycle.children.push(base_child);
-        cycle.children.reverse();
-        cycle.exits.reverse();
-        cycle.exits.push(join);
-        while right != base_child {
-            self.blocks[right].parent = block;
-            cycle.children.push(right);
-            let entry = self.blocks[right].entry;
-            cycle.exits.push(entry ^ 1);
-            right = self.top[self.source(entry)];
-        }
-        self.blocks[block] = Block::new(base, 0);
-        self.blocks[block].label = Label::Outer;
-        self.blocks[block].entry = self.blocks[base_child].entry;
-        self.cycles[block - self.n] = cycle;
-        self.list_leaves(block);
-        for &node in &self.leaves {
-            if self.blocks[self.top[node]].label == Label::Inner {
-                self.queue.push(node);
-            }
-            self.top[node] = block;
-        }
-        self.refresh_boundary(block);
-    }
-
-    fn refresh_boundary(&mut self, block: usize) {
-        for index in 0..self.cycles[block - self.n].children.len() {
-            let child = self.cycles[block - self.n].children[index];
-            self.blocks[child].best = NONE;
-            if child >= self.n && self.cycles[child - self.n].cached {
-                let cache = std::mem::take(&mut self.cycles[child - self.n].cache);
-                self.cycles[child - self.n].cached = false;
-                for id in cache {
-                    self.boundary_edge(block, id);
-                }
-            } else {
-                self.list_leaves(child);
-                for leaf in 0..self.leaves.len() {
-                    for arc in self.graph.out(self.leaves[leaf]) {
-                        self.boundary_edge(block, arc.edge);
-                    }
-                }
-            }
-        }
-        let mut best = NONE;
-        let mut slack = i128::MAX;
-        let cache = &mut self.cycles[block - self.n];
-        for neighbor in self.touched.drain(..) {
-            cache
-                .cache
-                .push(std::mem::replace(&mut self.best_to[neighbor], NONE));
-        }
-        cache.cached = true;
-        for &id in &self.cycles[block - self.n].cache {
-            let cost = self.slack(id);
-            if cost < slack {
-                best = id;
-                slack = cost;
-            }
-        }
-        self.blocks[block].best = best;
-    }
-
-    fn boundary_edge(&mut self, block: usize, id: EdgeId) {
-        let edge = &self.graph.edges()[id];
-        let a = self.top[edge.from];
-        let b = self.top[edge.to];
-        let neighbor = if b == block { a } else { b };
-        if neighbor == block || self.blocks[neighbor].label != Label::Outer {
-            return;
-        }
-        let previous = self.best_to[neighbor];
-        if self.improves(previous, self.slack(id)) {
-            if previous == NONE {
-                self.touched.push(neighbor);
-            }
-            self.best_to[neighbor] = id;
-        }
-    }
-
-    fn next_event(&self) -> Option<(i128, Event)> {
-        let mut best = None;
-        if !self.cardinality_first {
-            let minimum = self.blocks[..self.n]
-                .iter()
-                .map(|state| state.dual)
-                .min()
-                .unwrap();
-            best = Some((minimum, Event::Stop));
-        }
-        for node in 0..self.n {
-            let id = self.blocks[node].best;
-            if id != NONE && self.blocks[self.top[node]].label == Label::Free {
-                earlier(&mut best, self.slack(id), Event::Tighten(id));
-            }
-        }
-        for (block, state) in self.blocks.iter().enumerate() {
-            if state.parent != NONE || state.base == NONE {
-                continue;
-            }
-            if state.label == Label::Outer && state.best != NONE {
-                let slack = self.slack(state.best);
-                debug_assert_eq!(slack % 2, 0);
-                earlier(&mut best, slack / 2, Event::Tighten(state.best));
-            } else if state.label == Label::Inner && block >= self.n {
-                earlier(&mut best, state.dual, Event::Expand(block));
-            }
-        }
-        best
-    }
-
-    fn adjust_duals(&mut self, delta: i128) {
-        for node in 0..self.n {
-            match self.blocks[self.top[node]].label {
-                Label::Outer => self.blocks[node].dual -= delta,
-                Label::Inner => self.blocks[node].dual += delta,
-                _ => {}
-            }
-        }
-        for state in &mut self.blocks[self.n..] {
-            if state.parent == NONE && state.base != NONE {
-                match state.label {
-                    Label::Outer => state.dual += delta,
-                    Label::Inner => state.dual -= delta,
-                    _ => {}
-                }
+                stack.extend(self.parts[p].ring.iter().map(|x| x.0));
             }
         }
     }
 
-    fn expand(&mut self, block: usize, end_stage: bool) {
-        self.expansion.push(block);
-        while let Some(block) = self.expansion.pop() {
-            for index in 0..self.cycles[block - self.n].children.len() {
-                let child = self.cycles[block - self.n].children[index];
-                self.blocks[child].parent = NONE;
-                if end_stage && child >= self.n && self.blocks[child].dual == 0 {
-                    self.expansion.push(child);
-                } else {
-                    self.list_leaves(child);
-                    for &node in &self.leaves {
-                        self.top[node] = child;
-                    }
-                }
-            }
-            if !end_stage {
-                self.relabel_expansion(block);
-            }
-            let cycle = &mut self.cycles[block - self.n];
-            cycle.children.clear();
-            cycle.exits.clear();
-            cycle.cache.clear();
-            cycle.cached = false;
-            self.blocks[block] = Block::new(NONE, 0);
-            self.free_blocks.push(block);
+    fn open(&mut self, p: usize, restore_forest: bool) {
+        let matched = self.parts[p].mate;
+        let incoming = match self.parts[p].forest {
+            Forest::Odd(e) => Some(e),
+            _ => None,
+        };
+        let interior = |id: usize| {
+            let e = self.edges[id];
+            if self.owner[e.u] == p { e.u } else { e.v }
+        };
+        let exit_vertex = matched.map(interior);
+        let entry_vertex = incoming.map(interior);
+        let mut ring = std::mem::take(&mut self.parts[p].ring);
+        for &(child, _) in &ring {
+            self.assign(child, child);
+            self.parts[child].live = true;
+            self.parts[child].forest = Forest::Outside;
         }
-    }
-
-    fn relabel_expansion(&mut self, block: usize) {
-        let slot = block - self.n;
-        let mut entry = self.blocks[block].entry;
-        let entry_child = self.top[self.target(entry)];
-        let mut index = self.cycles[slot]
-            .children
-            .iter()
-            .position(|&child| child == entry_child)
-            .unwrap();
-        let forward = index % 2 == 1;
-        while index != 0 {
-            let exit = self.cycles[slot].exit(index, forward);
-            let current = self.target(entry);
-            let next = self.target(exit);
-            self.blocks[current].label = Label::Free;
-            self.blocks[next].label = Label::Free;
-            self.inner(current, entry);
-            self.allowed[exit / 2] = true;
-            index = self.cycles[slot].step(index, forward);
-            entry = self.cycles[slot].exit(index, forward);
-            self.allowed[entry / 2] = true;
-            index = self.cycles[slot].step(index, forward);
+        if let Some(v) = exit_vertex {
+            let position = ring.iter().position(|x| x.0 == self.owner[v]).unwrap();
+            ring.rotate_left(position);
         }
-        // The base's mate is already outer. Label the base without crossing it again.
-        self.label(self.target(entry), Label::Inner, entry);
-        index = self.cycles[slot].step(index, forward);
-        while self.cycles[slot].children[index] != entry_child {
-            let child = self.cycles[slot].children[index];
-            if self.blocks[child].label != Label::Outer {
-                self.list_leaves(child);
-                if let Some(&node) = self
-                    .leaves
-                    .iter()
-                    .find(|&&node| self.blocks[node].label == Label::Inner)
-                {
-                    let entry = self.blocks[node].entry;
-                    self.blocks[node].label = Label::Free;
-                    let matched = self.target(self.mate[self.blocks[child].base]);
-                    self.blocks[matched].label = Label::Free;
-                    self.inner(node, entry);
-                }
+        self.parts[ring[0].0].mate = matched;
+        for pair in ring[1..].chunks_exact(2) {
+            for &(child, _) in pair {
+                self.parts[child].mate = Some(pair[0].1);
             }
-            index = self.cycles[slot].step(index, forward);
         }
-    }
-
-    fn augment(&mut self, join: usize) {
-        for mut current in [join, join ^ 1] {
+        if restore_forest {
+            // Enter at the child hit by the forest edge, leave through the
+            // base. Exactly one of the two arcs of an odd ring has even length.
+            let v = entry_vertex.unwrap();
+            let mut i = ring.iter().position(|x| x.0 == self.owner[v]).unwrap();
+            let forward = i % 2 == 1;
+            let mut label = Forest::Odd(incoming.unwrap());
             loop {
-                let vertex = self.source(current);
-                let outer = self.top[vertex];
-                self.lift(outer, vertex);
-                self.mate[vertex] = current;
-                let previous = self.blocks[outer].entry;
-                if previous == NONE {
+                self.parts[ring[i].0].forest = label;
+                if i == 0 {
                     break;
                 }
-                let inner = self.top[self.source(previous)];
-                current = self.blocks[inner].entry;
-                let target = self.target(current);
-                self.lift(inner, target);
-                self.mate[target] = current ^ 1;
+                let next = if forward { (i + 1) % ring.len() } else { i - 1 };
+                let edge = ring[if forward { i } else { next }].1;
+                label = match label {
+                    Forest::Odd(_) => Forest::Even,
+                    _ => Forest::Odd(edge),
+                };
+                i = next;
             }
         }
-    }
-
-    fn lift(&mut self, block: usize, vertex: NodeId) {
-        self.edits.push(Edit::Start(block, vertex));
-        while let Some(edit) = self.edits.pop() {
-            match edit {
-                Edit::Start(block, vertex) => {
-                    if block < self.n {
-                        continue;
-                    }
-                    let mut child = vertex;
-                    while self.blocks[child].parent != block {
-                        child = self.blocks[child].parent;
-                    }
-                    let start = self.cycles[block - self.n]
-                        .children
-                        .iter()
-                        .position(|&item| item == child)
-                        .unwrap();
-                    self.edits.push(Edit::Walk {
-                        block,
-                        cursor: start,
-                        start,
-                        vertex,
-                    });
-                    self.edits.push(Edit::Start(child, vertex));
-                }
-                Edit::Walk {
-                    block,
-                    cursor,
-                    start,
-                    vertex,
-                } => {
-                    let cycle = &mut self.cycles[block - self.n];
-                    if cursor == 0 {
-                        cycle.children.rotate_left(start);
-                        cycle.exits.rotate_left(start);
-                        self.blocks[block].base = vertex;
-                    } else {
-                        let forward = start % 2 == 1;
-                        let first = cycle.step(cursor, forward);
-                        let second = cycle.step(first, forward);
-                        let edge = cycle.exit(first, forward);
-                        let (a, b) = (cycle.children[first], cycle.children[second]);
-                        self.edits.push(Edit::Walk {
-                            block,
-                            cursor: second,
-                            start,
-                            vertex,
-                        });
-                        self.edits.push(Edit::Pair(edge));
-                        self.edits.push(Edit::Start(b, self.target(edge)));
-                        self.edits.push(Edit::Start(a, self.source(edge)));
-                    }
-                }
-                Edit::Pair(edge) => {
-                    let (a, b) = (self.source(edge), self.target(edge));
-                    self.mate[a] = edge;
-                    self.mate[b] = edge ^ 1;
+        self.parts[p].live = false;
+        self.recycled.push(p);
+        if restore_forest {
+            for (child, _) in ring {
+                if !matches!(self.parts[child].forest, Forest::Odd(_)) {
+                    self.reschedule(child);
                 }
             }
         }
-    }
-}
-
-fn earlier(best: &mut Option<(i128, Event)>, value: i128, event: Event) {
-    if best.is_none_or(|(previous, _)| value < previous) {
-        *best = Some((value, event));
     }
 }

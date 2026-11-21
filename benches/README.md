@@ -32,3 +32,5 @@ Edmonds led on all three sparse random inputs. Gabow led on the sampled dense in
 The [Duong benchmark](duong.md) compares deterministic signed shortest paths with the SCC-aware Bellman–Ford baseline.
 
 The [network structure benchmark](network_structure.md) compares planarity, VF2++, and Louvain with NetworkX.
+
+The [witness and induced-match benchmark](obstructions.md) compares Kuratowski extraction and VF2++ induced subgraph isomorphism with NetworkX.

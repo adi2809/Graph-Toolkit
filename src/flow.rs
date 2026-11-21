@@ -7,11 +7,28 @@ use crate::queue::IndexedHeap;
 use crate::{EdgeId, Graph, GraphError, GraphKind, NONE, NodeId};
 
 mod augment;
+mod core_cycles;
+pub use core_cycles::{CoreCycleFlow, EmbeddedCycleHierarchy, max_flow_core_cycles};
+mod capacity_cost;
 mod cut_tree;
+mod mean;
+mod ratio;
+pub use capacity_cost::{
+    minimum_cost_flow_capacity_scaling, minimum_cost_flow_minimum_mean_cycle,
+    minimum_cost_flow_with_lower_bounds,
+};
+pub use mean::minimum_mean_cycle;
+pub use ratio::{
+    CycleRatioWeight, CycleStep, RatioCycle, minimum_ratio_cycle, minimum_undirected_ratio_cycle,
+};
 mod min_cost;
 mod network_simplex;
 mod transport;
-pub use augment::{max_flow_boykov_kolmogorov, max_flow_dinic, max_flow_edmonds_karp};
+pub use augment::{
+    TreeCycleBasis, TreeCycleFlow, max_flow_boykov_kolmogorov, max_flow_capacity_scaling,
+    max_flow_dinic, max_flow_dynamic_trees, max_flow_edmonds_karp, max_flow_ford_fulkerson,
+    max_flow_network_simplex, max_flow_st_planar, max_flow_tree_cycle, recover_dyadic_max_flow,
+};
 pub use cut_tree::{GomoryHuTree, gomory_hu_tree};
 pub use min_cost::{
     ArcCost, CostFlow, CostFlowError, MinCostMaxFlow, flow_cost, min_cost_max_flow,

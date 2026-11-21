@@ -106,7 +106,7 @@ fn dijkstra_search(
     distance
 }
 
-fn dijkstra_core<W>(
+pub(crate) fn dijkstra_core<W>(
     graph: &Graph<W>,
     source: NodeId,
     reverse: bool,
@@ -380,4 +380,25 @@ pub fn bidirectional_dijkstra(
         node = next;
     }
     Ok(Some(path))
+}
+
+/// Dijkstra using an indexed Fibonacci heap. O(E + V log V) amortized time,
+/// including parallel arcs, and O(V) auxiliary memory.
+pub fn dijkstra_fibonacci(graph: &Graph<u64>, source: NodeId) -> Result<ShortestPaths, GraphError> {
+    graph.validate_node(source)?;
+    let mut paths = ShortestPaths::new(graph.node_count());
+    let mut queue = crate::structures::FibonacciHeap::new(graph.node_count());
+    paths.distance[source] = 0;
+    queue.decrease(source, 0);
+    while let Some((distance, u)) = queue.pop() {
+        for arc in graph.out(u) {
+            let candidate = distance + u128::from(graph.edges()[arc.edge].weight);
+            if candidate < paths.distance[arc.node] {
+                paths.distance[arc.node] = candidate;
+                paths.parent[arc.node] = (u, arc.edge);
+                queue.decrease(arc.node, candidate);
+            }
+        }
+    }
+    Ok(paths)
 }

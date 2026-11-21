@@ -4,7 +4,8 @@ use graph_library::connectivity::{
     strongly_connected_components, topological_sort, weakly_connected_components,
 };
 use graph_library::flow::{
-    global_min_cut, max_flow, max_flow_boykov_kolmogorov, max_flow_dinic, max_flow_edmonds_karp,
+    global_min_cut, max_flow, max_flow_boykov_kolmogorov, max_flow_capacity_scaling,
+    max_flow_dinic, max_flow_edmonds_karp, max_flow_ford_fulkerson, max_flow_network_simplex,
 };
 use graph_library::grid::{Cell, Grid, GridError, Movement};
 use graph_library::matching::{
@@ -391,7 +392,7 @@ fn gabow_lifts_a_long_path_with_sparse_vertex_ids() {
 }
 
 #[test]
-fn both_bipartite_strategies_return_exact_matchings_and_covers() {
+fn bipartite_strategies_return_exact_matchings_and_covers() {
     let (left, right) = (3, 4);
     for mask in 0..1 << (left * right) {
         let pairs: Vec<_> = (0..left * right)
@@ -435,6 +436,8 @@ fn check_bipartite_matching(left: usize, right: usize, pairs: &[(usize, usize)],
     for matching in [
         graph.maximum_matching(),
         graph.randomized_maximum_matching(seed),
+        graph.maximum_matching_kuhn(),
+        graph.random_walk_maximum_matching(seed),
     ] {
         assert_eq!(matching.len(), expected, "{pairs:?}");
         assert_eq!(matching.pairs().count(), expected);
@@ -493,13 +496,19 @@ fn flow_and_min_cut_agree_with_exhaustive_cuts() {
                 .min()
                 .unwrap();
             if kind == GraphKind::Directed {
-                for solve in [
+                let flows = [
                     max_flow,
+                    max_flow_capacity_scaling,
                     max_flow_dinic,
                     max_flow_edmonds_karp,
                     max_flow_boykov_kolmogorov,
-                ] {
-                    let flow = solve(&graph, source, sink).unwrap();
+                ]
+                .into_iter()
+                .map(|solve| solve(&graph, source, sink).unwrap())
+                .chain(std::iter::once_with(|| {
+                    max_flow_network_simplex(&graph, source, sink).unwrap()
+                }));
+                for flow in flows {
                     assert_eq!(flow.value, expected, "directed case {case}");
                     assert!(flow.source_side[source] && !flow.source_side[sink]);
                     assert_eq!(
@@ -579,6 +588,7 @@ fn long_paths_use_iterative_searches() {
     ] {
         assert_eq!(solve(&chain, 0, n - 1).unwrap().value, 1);
     }
+    assert_eq!(max_flow_ford_fulkerson(&chain, 0, n - 1).unwrap().value, 1);
     // The greedy pass leaves an augmenting path that spans both partitions.
     let edges = (0..n - 1)
         .flat_map(|i| [(i, i), (i, i + 1)])

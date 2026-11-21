@@ -1,5 +1,9 @@
 //! Graph structure and minimum spanning forests.
 
+mod chordal;
+pub(crate) mod low_stretch;
+pub use chordal::{ChordalDecomposition, chordal_decomposition};
+pub use low_stretch::low_stretch_spanning_forest;
 use std::collections::VecDeque;
 
 use crate::traversal::depth_first;
@@ -11,6 +15,12 @@ mod dag;
 mod disjoint;
 mod dominance;
 mod dynamic;
+mod filter_forest;
+mod index;
+pub use filter_forest::minimum_spanning_forest_filtered;
+mod threshold;
+pub use index::{ChainReachabilityIndex, ReachabilityIndex};
+pub use threshold::ThresholdConnectivityIndex;
 mod spanning;
 pub use analysis::{
     BiconnectedComponents, Condensation, EdgeCut, biconnected_components, condensation,
@@ -27,11 +37,12 @@ pub use dag::{
 pub use disjoint::{edge_disjoint_paths, minimum_st_vertex_cut, node_disjoint_paths};
 pub use dominance::{dominance_frontiers, immediate_dominators};
 pub use dynamic::{
-    ConnectivityAnswer, ConnectivityEvent, DynamicConnectivityError, offline_dynamic_connectivity,
+    ConnectivityAnswer, ConnectivityEvent, DynamicConnectivityError, RollbackUnionFind,
+    offline_dynamic_connectivity,
 };
 pub use spanning::{
     BottleneckTree, SpanningTree, minimum_bottleneck_arborescence,
-    minimum_bottleneck_spanning_tree, minimum_spanning_tree,
+    minimum_bottleneck_spanning_tree, minimum_spanning_tree, random_spanning_forest,
 };
 
 #[derive(Clone, Debug)]

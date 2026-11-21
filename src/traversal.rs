@@ -168,3 +168,59 @@ pub(crate) fn depth_first<W>(
         }
     }
 }
+
+/// Single-source BFS with Beamer-style push/pull levels. In pull mode an
+/// unvisited vertex stops at its first predecessor in the current frontier.
+/// Returns shortest-hop distances; ties in parent selection depend on the mode.
+pub fn direction_optimizing_bfs<W>(
+    graph: &Graph<W>,
+    start: NodeId,
+) -> Result<BreadthFirst, GraphError> {
+    graph.validate_node(start)?;
+    let n = graph.node_count();
+    let mut bfs = BreadthFirst {
+        order: vec![start],
+        distance: vec![NONE; n],
+        parent: vec![NONE; n],
+        source: vec![NONE; n],
+    };
+    bfs.source[start] = start;
+    bfs.distance[start] = 0;
+    let mut begin = 0;
+    let mut level = 0;
+    let mut remaining = n - 1;
+    while begin < bfs.order.len() {
+        let end = bfs.order.len();
+        // Pull scans the vertex array each round. Amortize that overhead over
+        // broad levels and switch back to push for long, narrow tails.
+        if end - begin > n / 24 && end - begin > remaining / 12 {
+            for v in graph.nodes() {
+                if bfs.distance[v] != NONE {
+                    continue;
+                }
+                if let Some(arc) = graph.inc(v).iter().find(|a| bfs.distance[a.node] == level) {
+                    bfs.parent[v] = arc.node;
+                    bfs.source[v] = start;
+                    bfs.distance[v] = level + 1;
+                    bfs.order.push(v);
+                }
+            }
+        } else {
+            for i in begin..end {
+                let u = bfs.order[i];
+                for arc in graph.out(u) {
+                    if bfs.distance[arc.node] == NONE {
+                        bfs.parent[arc.node] = u;
+                        bfs.source[arc.node] = start;
+                        bfs.distance[arc.node] = level + 1;
+                        bfs.order.push(arc.node);
+                    }
+                }
+            }
+        }
+        remaining -= bfs.order.len() - end;
+        begin = end;
+        level += 1;
+    }
+    Ok(bfs)
+}

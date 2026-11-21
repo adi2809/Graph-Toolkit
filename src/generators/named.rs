@@ -1,11 +1,10 @@
 //! Named graphs and explicit algebraic constructions.
 //!
-//! Several fixed edge tables use the vertex numbering in NetworkX.
-//! See `src/matching/LICENSE.networkx` for its BSD notice.
+//! Named graph IDs follow the constructions below. See docs/algorithm-survey.md.
 
 use std::collections::HashSet;
 
-use super::{add, cubical_graph, cycle_graph, null_graph, tetrahedral_graph};
+use super::{add, cubical_graph, null_graph, tetrahedral_graph};
 use crate::planarity::check_planarity;
 use crate::{Graph, GraphBuilder, GraphError, GraphKind};
 
@@ -44,57 +43,40 @@ pub fn pappus_graph() -> Graph<()> {
     lcf_graph(18, &[5, 7, -7, 7, -7, -5], 3).unwrap()
 }
 
+// Build small fixtures from paths in their defining drawings.
+fn paths(n: usize, walks: &[&[usize]]) -> Graph<()> {
+    let mut b = GraphBuilder::new(n, GraphKind::Undirected);
+    for path in walks {
+        for step in path.windows(2) {
+            add(&mut b, step[0], step[1]);
+        }
+    }
+    b.build()
+}
+
 pub fn bull_graph() -> Graph<()> {
-    from_pairs(5, &[(0, 1), (0, 2), (1, 2), (1, 3), (2, 4)])
+    paths(5, &[&[3, 1, 0, 2, 4], &[1, 2]])
 }
-
 pub fn diamond_graph() -> Graph<()> {
-    from_pairs(4, &[(0, 1), (0, 2), (1, 2), (1, 3), (2, 3)])
+    paths(4, &[&[0, 1, 3, 2, 0], &[1, 2]])
 }
-
 pub fn house_graph() -> Graph<()> {
     house(false)
 }
-
 pub fn house_x_graph() -> Graph<()> {
     house(true)
 }
-
-fn house(diagonals: bool) -> Graph<()> {
-    let base = [
-        (0, 1),
-        (0, 2),
-        (1, 3),
-        (2, 3),
-        (2, 4),
-        (3, 4),
-        (0, 3),
-        (1, 2),
-    ];
-    from_pairs(5, &base[..if diagonals { 8 } else { 6 }])
+fn house(crossed: bool) -> Graph<()> {
+    let mut walks = vec![&[0, 1, 3, 2, 0][..], &[2, 4, 3]];
+    if crossed {
+        walks.extend([&[0, 3][..], &[1, 2]]);
+    }
+    paths(5, &walks)
 }
 
+/// Hamiltonian-cycle numbering of the Frucht graph.
 pub fn frucht_graph() -> Graph<()> {
-    let mut builder = GraphBuilder::with_edge_capacity(12, GraphKind::Undirected, 18);
-    for edge in cycle_graph(7, GraphKind::Undirected).edges() {
-        add(&mut builder, edge.from, edge.to);
-    }
-    for (u, v) in [
-        (0, 7),
-        (1, 7),
-        (2, 8),
-        (3, 9),
-        (4, 9),
-        (5, 10),
-        (6, 10),
-        (7, 11),
-        (8, 11),
-        (8, 9),
-        (10, 11),
-    ] {
-        add(&mut builder, u, v);
-    }
-    builder.build()
+    lcf_graph(12, &[-5, -2, -4, 2, 5, -2, 2, 5, -2, -5, 4, 2], 1).unwrap()
 }
 
 pub fn icosahedral_graph() -> Graph<()> {
@@ -169,158 +151,65 @@ fn truncate(base: &Graph<()>) -> Graph<()> {
     builder.build()
 }
 
+/// Four identical sectors of the Hamiltonian drawing, each spanning three vertices.
 pub fn chvatal_graph() -> Graph<()> {
-    from_pairs(
-        12,
-        &[
-            (0, 1),
-            (0, 4),
-            (0, 6),
-            (0, 9),
-            (1, 2),
-            (1, 5),
-            (1, 7),
-            (2, 3),
-            (2, 6),
-            (2, 8),
-            (3, 4),
-            (3, 7),
-            (3, 9),
-            (4, 5),
-            (4, 8),
-            (5, 10),
-            (5, 11),
-            (6, 10),
-            (6, 11),
-            (7, 8),
-            (7, 11),
-            (8, 10),
-            (9, 10),
-            (9, 11),
-        ],
-    )
+    let mut b = GraphBuilder::new(12, GraphKind::Undirected);
+    for v in 0..12 {
+        add(&mut b, v, (v + 1) % 12);
+        match v % 3 {
+            0 => add(&mut b, v, (v + 4) % 12),
+            2 => add(&mut b, v, (v + 3) % 12),
+            _ => {}
+        }
+        if v < 6 && v % 3 != 2 {
+            add(&mut b, v, v + 6);
+        }
+    }
+    b.build()
 }
 
 pub fn krackhardt_kite_graph() -> Graph<()> {
-    from_pairs(
+    // Two wings share the central actor. The tail leaves through their tips.
+    paths(
         10,
         &[
-            (0, 1),
-            (0, 2),
-            (0, 3),
-            (0, 5),
-            (1, 3),
-            (1, 4),
-            (1, 6),
-            (2, 3),
-            (2, 5),
-            (3, 4),
-            (3, 5),
-            (3, 6),
-            (4, 6),
-            (5, 6),
-            (5, 7),
-            (6, 7),
-            (7, 8),
-            (8, 9),
+            &[2, 0, 1, 4, 6, 1, 3, 4],
+            &[0, 3, 2, 5, 0],
+            &[5, 3, 6, 5, 7, 6],
+            &[7, 8, 9],
         ],
     )
 }
 
 pub fn sedgewick_maze_graph() -> Graph<()> {
-    from_pairs(
-        8,
-        &[
-            (0, 2),
-            (0, 5),
-            (0, 7),
-            (1, 7),
-            (2, 6),
-            (3, 4),
-            (3, 5),
-            (4, 5),
-            (4, 6),
-            (4, 7),
-        ],
-    )
+    // The five-room circuit, a shortcut with a dead end, and a triangular room.
+    paths(8, &[&[0, 2, 6, 4, 5, 0], &[0, 7, 4], &[7, 1], &[4, 3, 5]])
 }
 
-/// Tutte's cubic non-Hamiltonian planar graph.
+/// Three copies of Tutte's 15-vertex fragment surround one hub.
+/// The first row of each fragment contains its two side ports (0 and 2).
 pub fn tutte_graph() -> Graph<()> {
-    from_pairs(
-        46,
-        &[
-            (0, 1),
-            (0, 2),
-            (0, 3),
-            (1, 4),
-            (1, 26),
-            (2, 10),
-            (2, 11),
-            (3, 18),
-            (3, 19),
-            (4, 5),
-            (4, 33),
-            (5, 6),
-            (5, 29),
-            (6, 7),
-            (6, 27),
-            (7, 8),
-            (7, 14),
-            (8, 9),
-            (8, 38),
-            (9, 10),
-            (9, 37),
-            (10, 39),
-            (11, 12),
-            (11, 39),
-            (12, 13),
-            (12, 35),
-            (13, 14),
-            (13, 15),
-            (14, 34),
-            (15, 16),
-            (15, 22),
-            (16, 17),
-            (16, 44),
-            (17, 18),
-            (17, 43),
-            (18, 45),
-            (19, 20),
-            (19, 45),
-            (20, 21),
-            (20, 41),
-            (21, 22),
-            (21, 23),
-            (22, 40),
-            (23, 24),
-            (23, 27),
-            (24, 25),
-            (24, 32),
-            (25, 26),
-            (25, 31),
-            (26, 33),
-            (27, 28),
-            (28, 29),
-            (28, 32),
-            (29, 30),
-            (30, 31),
-            (30, 33),
-            (31, 32),
-            (34, 35),
-            (34, 38),
-            (35, 36),
-            (36, 37),
-            (36, 39),
-            (37, 38),
-            (40, 41),
-            (40, 44),
-            (41, 42),
-            (42, 43),
-            (42, 45),
-            (43, 44),
-        ],
-    )
+    let mut b = GraphBuilder::new(46, GraphKind::Undirected);
+    let paths: &[&[usize]] = &[
+        &[0, 1, 2, 7, 13, 14, 11, 8, 3, 0], // perimeter, ending at the left port
+        &[3, 4, 5, 6, 7],
+        &[8, 9, 10, 12, 11],
+        &[13, 12],
+        &[9, 4],
+        &[5, 1],
+        &[10, 6],
+    ];
+    for copy in 0..3 {
+        let offset = 15 * copy;
+        for path in paths {
+            for edge in path.windows(2) {
+                add(&mut b, offset + edge[0], offset + edge[1]);
+            }
+        }
+        add(&mut b, 45, offset + 14);
+        add(&mut b, offset + 2, 15 * ((copy + 1) % 3));
+    }
+    b.build()
 }
 
 /// The Margulis–Gabber–Galil expander on Zₙ × Zₙ. The graph is 8-regular
@@ -371,12 +260,4 @@ pub fn dorogovtsev_goltsev_mendes_graph(iterations: usize) -> Result<Graph<()>, 
         }
     }
     Ok(builder.build())
-}
-
-fn from_pairs(n: usize, pairs: &[(usize, usize)]) -> Graph<()> {
-    let mut builder = GraphBuilder::with_edge_capacity(n, GraphKind::Undirected, pairs.len());
-    for &(u, v) in pairs {
-        add(&mut builder, u, v);
-    }
-    builder.build()
 }

@@ -757,6 +757,9 @@ impl CutScratch {
             if map[1][node] == NONE {
                 let class = 4 * color[1][node] + flags(frontier[1][node]);
                 let entry = &mut self.groups[class];
+                if extra_vertices == 0 && (entry[0] == 0 || entry[1] < count) {
+                    return false;
+                }
                 entry[0] = entry[0].saturating_sub(1);
                 entry[1] = entry[1].saturating_sub(count);
             } else {
@@ -766,16 +769,73 @@ impl CutScratch {
                 missing_mapped -= 1;
             }
         }
-        if extra_vertices == 0 {
-            // With equal row lengths all left unmet demands must be zero,
-            // and their summed multiplicities must be equal. The ordinary
-            // isomorphism already matched total degrees and loop counts.
-            debug_assert_eq!(rows[0].len(), rows[1].len());
-        }
         missing_mapped == 0
             && self
                 .group_touched
                 .iter()
                 .all(|&class| self.groups[class] == [0; 2])
     }
+}
+
+/// AHU subtree classification for two unordered rooted undirected trees.
+/// Returns false if either input fails the tree test. Sorting child classes
+/// gives O(n log n) expected time with hash interning and O(n) memory.
+pub fn rooted_tree_is_isomorphic<A, B>(
+    a: &Graph<A>,
+    root_a: usize,
+    b: &Graph<B>,
+    root_b: usize,
+) -> Result<bool, crate::GraphError> {
+    for kind in [a.kind(), b.kind()] {
+        if kind == crate::GraphKind::Directed {
+            return Err(crate::GraphError::RequiresUndirected);
+        }
+    }
+    a.validate_node(root_a)?;
+    b.validate_node(root_b)?;
+    if a.node_count() != b.node_count()
+        || a.edge_count() != a.node_count() - 1
+        || b.edge_count() != a.edge_count()
+    {
+        return Ok(false);
+    }
+    fn classify<W>(
+        g: &Graph<W>,
+        root: usize,
+        classes: &mut HashMap<Vec<usize>, usize>,
+    ) -> Option<usize> {
+        let n = g.node_count();
+        let mut parent = vec![NONE; n];
+        parent[root] = root;
+        let mut order = vec![root];
+        let mut head = 0;
+        while let Some(&u) = order.get(head) {
+            head += 1;
+            for a in g.out(u) {
+                if parent[a.node] == NONE {
+                    parent[a.node] = u;
+                    order.push(a.node);
+                }
+            }
+        }
+        if order.len() != n {
+            return None;
+        }
+        let mut label = vec![0; n];
+        for u in order.into_iter().rev() {
+            let mut children: Vec<_> = g
+                .out(u)
+                .iter()
+                .filter(|a| parent[a.node] == u)
+                .map(|a| label[a.node])
+                .collect();
+            children.sort_unstable();
+            let next = classes.len();
+            label[u] = *classes.entry(children).or_insert(next);
+        }
+        Some(label[root])
+    }
+    let mut classes = HashMap::new();
+    Ok(classify(a, root_a, &mut classes)
+        .is_some_and(|label| classify(b, root_b, &mut classes) == Some(label)))
 }

@@ -1,4 +1,12 @@
+pub(super) mod recovery;
+pub use recovery::recover_dyadic_max_flow;
+mod dynamic_blocking;
+pub use dynamic_blocking::max_flow_dynamic_trees;
+mod planar;
+pub use planar::max_flow_st_planar;
+mod tree_cycle;
 use std::collections::VecDeque;
+pub use tree_cycle::{TreeCycleBasis, TreeCycleFlow, max_flow_tree_cycle};
 
 use super::{MaxFlow, Residual, residual_at, residual_neighbors, validate_terminals};
 use crate::{Graph, GraphError, NONE, NodeId};
@@ -52,6 +60,79 @@ pub fn max_flow_edmonds_karp(
     Ok(state.finish(source))
 }
 
+/// Ford–Fulkerson with depth-first path search. Integral capacities ensure
+/// termination. The number of augmentations can grow with the flow value.
+pub fn max_flow_ford_fulkerson(
+    graph: &Graph<u64>,
+    source: NodeId,
+    sink: NodeId,
+) -> Result<MaxFlow, GraphError> {
+    threshold_flow(graph, source, sink, 1)
+}
+
+/// Capacity-scaling Ford–Fulkerson. Each search uses residual arcs at least
+/// as large as the current power of two. O(E) augmentations per scale.
+pub fn max_flow_capacity_scaling(
+    graph: &Graph<u64>,
+    source: NodeId,
+    sink: NodeId,
+) -> Result<MaxFlow, GraphError> {
+    let largest = graph.edges().iter().map(|e| e.weight).max().unwrap_or(0);
+    threshold_flow(
+        graph,
+        source,
+        sink,
+        largest.checked_ilog2().map_or(0, |bit| 1 << bit),
+    )
+}
+
+fn threshold_flow(
+    graph: &Graph<u64>,
+    source: NodeId,
+    sink: NodeId,
+    mut threshold: u64,
+) -> Result<MaxFlow, GraphError> {
+    validate_terminals(graph, source, sink)?;
+    let mut network = Network::new(graph);
+    let mut visited = vec![false; graph.node_count()];
+    let mut touched = Vec::new();
+    let mut stack = Vec::new();
+    let mut path = Vec::new();
+    while threshold > 0 {
+        stack.clear();
+        path.clear();
+        stack.push((source, 0));
+        visited[source] = true;
+        touched.push(source);
+        while let Some((v, cursor)) = stack.last_mut() {
+            if *v == sink {
+                break;
+            }
+            let Some(arc) = residual_at(graph, *v, *cursor) else {
+                stack.pop();
+                path.pop();
+                continue;
+            };
+            *cursor += 1;
+            if !visited[arc.to] && network.capacity(arc) >= threshold {
+                visited[arc.to] = true;
+                touched.push(arc.to);
+                stack.push((arc.to, 0));
+                path.push(arc);
+            }
+        }
+        if visited[sink] {
+            network.augment(&path);
+        } else {
+            threshold /= 2;
+        }
+        for v in touched.drain(..) {
+            visited[v] = false;
+        }
+    }
+    Ok(network.finish(source))
+}
+
 /// Dinic maximum flow with level graphs and iterative blocking-flow search.
 /// Runs in O(V² E) time and O(V + E) space.
 pub fn max_flow_dinic(
@@ -60,7 +141,11 @@ pub fn max_flow_dinic(
     sink: NodeId,
 ) -> Result<MaxFlow, GraphError> {
     validate_terminals(graph, source, sink)?;
-    let mut state = Network::new(graph);
+    Ok(finish_dinic(Network::new(graph), source, sink))
+}
+
+fn finish_dinic(mut state: Network<'_>, source: NodeId, sink: NodeId) -> MaxFlow {
+    let graph = state.graph;
     let mut level = vec![NONE; graph.node_count()];
     let mut cursor = vec![0; level.len()];
     let mut queue = Vec::new();
@@ -68,7 +153,7 @@ pub fn max_flow_dinic(
     loop {
         state.levels(source, &mut level, &mut queue);
         if level[sink] == NONE {
-            return Ok(state.finish(source));
+            return state.finish(source);
         }
         cursor.fill(0);
         let mut node = source;
@@ -364,4 +449,53 @@ impl Trees<'_> {
         }
         Some(depth)
     }
+}
+
+/// Maximum flow by primal network simplex. A unit reward on the return arcs
+/// makes minimizing circulation cost equivalent to maximizing s–t throughput.
+pub fn max_flow_network_simplex(
+    graph: &Graph<u64>,
+    source: NodeId,
+    sink: NodeId,
+) -> Result<MaxFlow, super::CostFlowError> {
+    use super::ArcCost;
+    validate_terminals(graph, source, sink)?;
+    let mut b = Graph::builder(graph.node_count(), crate::GraphKind::Directed);
+    for e in graph.edges() {
+        b.add_edge(
+            e.from,
+            e.to,
+            ArcCost {
+                capacity: e.weight,
+                unit_cost: 0,
+            },
+        )?;
+    }
+    let mut bound: u128 = graph
+        .out(source)
+        .iter()
+        .filter(|a| a.node != source)
+        .map(|a| u128::from(graph.edges()[a.edge].weight))
+        .sum();
+    while bound != 0 {
+        let capacity = bound.min(u128::from(u64::MAX)) as u64;
+        b.add_edge(
+            sink,
+            source,
+            ArcCost {
+                capacity,
+                unit_cost: -1,
+            },
+        )?;
+        bound -= u128::from(capacity);
+    }
+    let solution = super::network_simplex(&b.build(), &vec![0; graph.node_count()])?
+        .expect("zero circulation is feasible");
+    let mut network = Network::new(graph);
+    network.value = solution.total_cost.unsigned_abs();
+    for (capacity, &amount) in network.capacity.iter_mut().zip(&solution.edge_flows) {
+        capacity[0] -= amount;
+        capacity[1] = amount;
+    }
+    Ok(network.finish(source))
 }

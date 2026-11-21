@@ -113,6 +113,19 @@ fn cost_scaling_agrees_with_exhaustive_integer_flows() {
             &mut best,
             &mut maximum,
         );
+        for solver in [
+            graph_library::flow::minimum_cost_flow_capacity_scaling,
+            graph_library::flow::minimum_cost_flow_minimum_mean_cycle,
+        ] {
+            let actual = solver(&graph, &supply).unwrap();
+            assert_eq!(actual.as_ref().map(|f| f.total_cost), best, "case {case}");
+            if let Some(flow) = actual {
+                assert_eq!(
+                    balances(&graph, &flow),
+                    supply.iter().copied().map(i128::from).collect::<Vec<_>>()
+                );
+            }
+        }
         let canceled = minimum_cost_flow_cycle_canceling(&graph, &supply).unwrap();
         assert_eq!(
             canceled.as_ref().map(|flow| flow.total_cost),
@@ -221,5 +234,60 @@ fn disconnected_negative_cycles_and_wide_arithmetic() {
     assert_eq!(
         minimum_cost_flow(&overflow, &[0]),
         Err(CostFlowError::ArithmeticOverflow)
+    );
+}
+
+#[test]
+fn both_new_transshipment_solvers_handle_wide_costs_and_validation() {
+    use graph_library::flow::{
+        minimum_cost_flow_capacity_scaling, minimum_cost_flow_minimum_mean_cycle,
+    };
+    for solve in [
+        minimum_cost_flow_minimum_mean_cycle,
+        minimum_cost_flow_capacity_scaling,
+    ] {
+        let g = graph(
+            3,
+            &[
+                (0, 1, u64::MAX, i64::MIN),
+                (1, 0, u64::MAX, i64::MAX),
+                (2, 2, u64::MAX, -1),
+            ],
+        );
+        let result = solve(&g, &[0; 3]).unwrap().unwrap();
+        assert_eq!(result.edge_flows, [u64::MAX; 3]);
+        assert_eq!(result.total_cost, -2 * i128::from(u64::MAX));
+        assert!(solve(&g, &[2, 0, -2]).unwrap().is_none());
+        assert!(matches!(
+            solve(&g, &[0]),
+            Err(CostFlowError::SupplyCount { .. })
+        ));
+        let overflow = graph(1, &[(0, 0, u64::MAX, i64::MIN), (0, 0, u64::MAX, i64::MIN)]);
+        assert_eq!(
+            solve(&overflow, &[0]),
+            Err(CostFlowError::ArithmeticOverflow)
+        );
+    }
+}
+
+#[test]
+fn lower_bounds_include_mandatory_costs_and_wide_intermediate_balances() {
+    use graph_library::flow::minimum_cost_flow_with_lower_bounds as solve;
+    let g = graph(
+        3,
+        &[(0, 1, 5, 3), (0, 2, 4, 1), (2, 1, 4, 1), (2, 2, 3, -2)],
+    );
+    let f = solve(&g, &[4, -4, 0], &[2, 0, 0, 1]).unwrap().unwrap();
+    assert_eq!((f.edge_flows, f.total_cost), (vec![2, 2, 2, 3], 4));
+    assert!(solve(&g, &[1, -1, 0], &[2, 0, 0, 0]).unwrap().is_none());
+    assert!(matches!(
+        solve(&g, &[0; 3], &[6, 0, 0, 0]),
+        Err(CostFlowError::CapacityExceeded { edge: 0 })
+    ));
+    let g = graph(2, &[(0, 1, u64::MAX, i64::MAX), (1, 0, u64::MAX, i64::MIN)]);
+    let f = solve(&g, &[0, 0], &[u64::MAX, 0]).unwrap().unwrap();
+    assert_eq!(
+        (f.edge_flows, f.total_cost),
+        (vec![u64::MAX; 2], -i128::from(u64::MAX))
     );
 }

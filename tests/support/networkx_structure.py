@@ -150,13 +150,13 @@ def main():
                 certificate.add_edge(u, v)
             if certificate:
                 assert edge_subdivision(certificate)
-            elapsed, (planar, nx_certificate) = measure(
+            elapsed, (is_planar_graph, nx_certificate) = measure(
                 lambda: nx.check_planarity(g, counterexample=True), repeats
             )
-            assert bool(certificate) != planar
-            if not planar:
+            assert bool(certificate) != is_planar_graph
+            if not is_planar_graph:
                 assert edge_subdivision(nx_certificate)
-            print(elapsed, int(planar), nx_certificate.number_of_edges() if not planar else 0)
+            print(elapsed, int(is_planar_graph), nx_certificate.number_of_edges() if not is_planar_graph else 0)
         elif mode == b"L":
             g = graph(tokens)
             resolution, threshold = float(next(tokens)), float(next(tokens))

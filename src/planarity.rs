@@ -56,7 +56,7 @@ impl PlanarEmbedding {
 /// Tests planarity of the underlying simple undirected graph in O(V + E) time
 /// and space. The iterative implementation handles deep DFS trees.
 pub fn is_planar<W>(graph: &Graph<W>) -> bool {
-    if graph.node_count() < 5 {
+    if graph.node_count() < 5 || graph.edge_count() < 9 {
         return true;
     }
     let Some(simple) = simple_projection(graph, false) else {
@@ -626,5 +626,56 @@ impl<'g> Constraints<'g> {
                 left = self.left[id];
             }
         }
+    }
+}
+
+impl PlanarEmbedding {
+    /// Plane dual of the simple projection. One boundary per connected
+    /// component is chosen as the shared exterior (face 0). A bridge becomes
+    /// a loop. Each dual edge carries the original primal edge ID.
+    pub fn dual_graph(&self) -> Graph<EdgeId> {
+        let (count, face) = self.dart_face_ids();
+        let mut first = std::collections::HashMap::new();
+        let mut dual = Graph::builder(count, GraphKind::Undirected);
+        for (arc, id) in self.rotation.iter().zip(face) {
+            if let Some(other) = first.remove(&arc.edge) {
+                dual.add_edge(other, id, arc.edge).unwrap();
+            } else {
+                first.insert(arc.edge, id);
+            }
+        }
+        dual.build()
+    }
+
+    /// Returns dual face IDs in the same flattened vertex order as the
+    /// clockwise neighbor lists. Face zero joins the component exteriors.
+    pub fn dart_face_ids(&self) -> (usize, Vec<usize>) {
+        let mut components = crate::connectivity::DisjointSet::new(self.node_count());
+        for u in 0..self.node_count() {
+            for a in &self.rotation[self.offsets[u]..self.offsets[u + 1]] {
+                components.union(u, a.node);
+            }
+        }
+        let mut exterior = vec![false; self.node_count()];
+        let mut face = vec![NONE; self.rotation.len()];
+        let mut count = 1;
+        for dart in 0..face.len() {
+            if face[dart] != NONE {
+                continue;
+            }
+            let component = components.find(self.rotation[dart].node);
+            let id = if std::mem::replace(&mut exterior[component], true) {
+                count += 1;
+                count - 1
+            } else {
+                0
+            };
+            let mut current = dart;
+            while face[current] == NONE {
+                face[current] = id;
+                current = self.face_next[current];
+            }
+        }
+        (count, face)
     }
 }

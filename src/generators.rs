@@ -1,10 +1,14 @@
 //! Deterministic and seeded generators for dense-ID CSR graphs.
 //! Topology generators emit unit payloads. Graph transforms can retain edge payloads.
 
+mod algebraic;
 mod geometric;
 mod lattice;
 mod named;
 mod random;
+pub use algebraic::{
+    chordal_cycle_graph, hkn_harary_graph, kneser_graph, paley_graph, random_tournament,
+};
 pub use geometric::{GeometricGraph, geometric_edges, random_geometric_graph};
 pub use lattice::{hexagonal_lattice_graph, triangular_lattice_graph};
 pub use named::{
@@ -15,11 +19,14 @@ pub use named::{
     tutte_graph,
 };
 pub use random::{
-    barabasi_albert_graph, configuration_model, connected_watts_strogatz_graph,
-    degree_sequence_tree, dense_gnm_random_graph, directed_configuration_model, erdos_renyi_graph,
-    expected_degree_graph, fast_gnp_random_graph, gnm_random_graph, gnp_random_graph,
-    havel_hakimi_graph, newman_watts_strogatz_graph, planted_partition_graph, random_k_lift,
-    random_labeled_tree, random_partition_graph, stochastic_block_model, watts_strogatz_graph,
+    barabasi_albert_graph, bipartite_gnp_random_graph, configuration_model,
+    connected_watts_strogatz_graph, degree_sequence_tree, dense_gnm_random_graph,
+    directed_configuration_model, erdos_renyi_graph, expected_degree_graph, fast_gnp_random_graph,
+    gn_graph, gnc_graph, gnm_random_graph, gnp_random_graph, gnr_graph, havel_hakimi_graph,
+    newman_watts_strogatz_graph, planted_partition_graph, random_clustered_graph,
+    random_intersection_graph, random_k_lift, random_labeled_tree, random_partition_graph,
+    random_regular_bipartite_multigraph, random_regular_graph, stochastic_block_model,
+    watts_strogatz_graph,
 };
 
 use crate::{Graph, GraphBuilder, GraphError, GraphKind};

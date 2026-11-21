@@ -1,5 +1,7 @@
 //! Implicit rectangular grids with bit-packed obstacles and no allocated edges.
 
+mod jump;
+
 use std::error::Error;
 use std::fmt;
 
@@ -29,6 +31,7 @@ pub enum Movement {
 #[non_exhaustive]
 pub enum GridError {
     InvalidDimensions,
+    RequiresFourWayMovement,
     OutOfBounds(Cell),
     Blocked(Cell),
 }
@@ -36,6 +39,9 @@ pub enum GridError {
 impl fmt::Display for GridError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
+            Self::RequiresFourWayMovement => {
+                f.write_str("jump-point routing requires four-way movement")
+            }
             Self::InvalidDimensions => f.write_str("grid dimensions must be nonzero and fit usize"),
             Self::OutOfBounds(cell) => {
                 write!(f, "cell ({}, {}) is outside the grid", cell.row, cell.col)
@@ -223,4 +229,50 @@ fn cell_at(index: usize, cols: usize) -> Cell {
 
 fn index_at(cell: Cell, rows: usize, cols: usize) -> Option<usize> {
     (cell.row < rows && cell.col < cols).then(|| cell.row * cols + cell.col)
+}
+
+/// Snapshot of open-cell connectivity. Construction takes O(rows × cols),
+/// queries O(1). Call Grid::connectivity_index again after editing obstacles.
+pub struct GridConnectivity {
+    rows: usize,
+    cols: usize,
+    component: Vec<usize>,
+}
+impl Grid {
+    pub fn connectivity_index(&self) -> GridConnectivity {
+        let mut component = vec![crate::NONE; self.rows * self.cols];
+        let mut stack = Vec::new();
+        for root in 0..component.len() {
+            if self.blocked_at(root) || component[root] != crate::NONE {
+                continue;
+            }
+            component[root] = root;
+            stack.push(root);
+            while let Some(v) = stack.pop() {
+                for next in self.neighbors(v) {
+                    if component[next] == crate::NONE {
+                        component[next] = root;
+                        stack.push(next);
+                    }
+                }
+            }
+        }
+        GridConnectivity {
+            rows: self.rows,
+            cols: self.cols,
+            component,
+        }
+    }
+}
+impl GridConnectivity {
+    pub fn connected(&self, a: Cell, b: Cell) -> Result<bool, GridError> {
+        let lookup = |c| {
+            let id = index_at(c, self.rows, self.cols).ok_or(GridError::OutOfBounds(c))?;
+            let component = self.component[id];
+            (component != crate::NONE)
+                .then_some(component)
+                .ok_or(GridError::Blocked(c))
+        };
+        Ok(lookup(a)? == lookup(b)?)
+    }
 }

@@ -371,13 +371,14 @@ fn kuratowski_subdivisions_agree_with_networkx() {
             writeln!(query, "{} {}", edge.from, edge.to).unwrap();
         }
     }
+    let count = expected.iter().filter(|&&planar| !planar).count();
     let (_, output) = oracle::invoke("1", &query);
     assert_eq!(expected.len(), output.len());
     for (id, (planar, result)) in expected.into_iter().zip(output).enumerate() {
         assert_eq!(planar, result[1] == "1", "case {id}");
     }
     println!(
-        "NetworkX {version}, {} planarity decisions and independent subdivision checks",
+        "NetworkX {version}, {} planarity decisions and {count} independent subdivision checks",
         cases.len()
     );
 }
@@ -426,4 +427,106 @@ fn induced_vf2pp_agrees_with_networkx() {
         assert_eq!(answer, nx[1] == "1", "case {id}");
     }
     println!("NetworkX {version}, {n} induced subgraph comparisons");
+}
+
+#[test]
+fn new_generators_match_their_combinatorial_models() {
+    use graph_library::connectivity::{is_directed_acyclic_graph, weakly_connected_components};
+    use graph_library::generators::*;
+    use graph_library::isomorphism::vf2pp_is_isomorphic;
+
+    // Kneser(5,2) is the Petersen graph. Kneser(6,3) pairs complements.
+    let kneser = kneser_graph(5, 2).unwrap();
+    assert!(vf2pp_is_isomorphic(&kneser, &petersen_graph()));
+    let kneser = kneser_graph(6, 3).unwrap();
+    assert_eq!(kneser.degree_histogram(), [0, 20]);
+    let kneser = kneser_graph(8, 2).unwrap();
+    assert_eq!(kneser.degree_histogram()[15], 28);
+    assert_eq!(kneser_graph(5, 4).unwrap().degree_histogram(), [5]);
+    assert_eq!(kneser_graph(0, 0).unwrap().node_count(), 1);
+
+    for n in 3_usize..=8 {
+        for k in 2..n {
+            let harary = hkn_harary_graph(k, n).unwrap();
+            assert_eq!(harary.edge_count(), (n * k).div_ceil(2));
+            for mask in 0..1_usize << n {
+                if (mask.count_ones() as usize) < k {
+                    let retained = harary.nodes().filter(|&u| mask & (1 << u) == 0);
+                    let subgraph = induced_subgraph(&harary, retained).unwrap().materialize();
+                    assert_eq!(weakly_connected_components(&subgraph.graph).count, 1);
+                }
+            }
+        }
+    }
+    let directed = paley_graph(11, GraphKind::Directed).unwrap();
+    assert_eq!(directed.edge_count(), 55);
+    assert_eq!(
+        directed
+            .nodes()
+            .map(|u| directed.outgoing(u).unwrap().len())
+            .min(),
+        Some(5)
+    );
+    assert_eq!(
+        paley_graph(13, UNDIRECTED).unwrap().degree_histogram()[6],
+        13
+    );
+    assert!(paley_graph(91, UNDIRECTED).is_err());
+    if let Ok(composite) = usize::try_from(341_550_071_728_321_u64) {
+        assert!(chordal_cycle_graph(composite).is_err());
+    }
+    assert_eq!(chordal_cycle_graph(11).unwrap().degree_histogram()[6], 11);
+
+    let tournament = random_tournament(45, 36).unwrap();
+    let mut pairs = BTreeSet::new();
+    for e in tournament.edges() {
+        assert!(e.from != e.to);
+        assert!(pairs.insert((e.from.min(e.to), e.from.max(e.to))));
+    }
+    assert_eq!(pairs.len(), 45 * 44 / 2);
+    assert_eq!(
+        tournament.edges(),
+        random_tournament(45, 36).unwrap().edges()
+    );
+
+    let degrees = [(2, 1), (1, 2), (5, 2), (0, 1)];
+    let g = random_clustered_graph(&degrees, 36).unwrap();
+    for (u, (edge, triangle)) in degrees.into_iter().enumerate() {
+        assert_eq!(g.degree(u).unwrap(), edge + 2 * triangle);
+    }
+    assert!(random_clustered_graph(&[(1, 0)], 36).is_err());
+    let models = [
+        gn_graph(500, 2),
+        gnr_graph(500, 1.0, 3).unwrap(),
+        gnc_graph(500, 4),
+    ];
+    for g in &models {
+        assert!(is_directed_acyclic_graph(g));
+        assert_eq!(weakly_connected_components(g).count, 1);
+        assert!(g.edges().iter().all(|e| e.from > e.to));
+    }
+    assert_eq!(models[0].edge_count(), 499);
+    assert_eq!(models[1].incoming(0).unwrap().len(), 499);
+    assert!(models[2].edge_count() > 499);
+}
+
+#[test]
+#[ignore = "requires Python and NetworkX"]
+fn algebraic_generators_agree_with_networkx() {
+    use graph_library::generators::{chordal_cycle_graph, paley_graph};
+    let mut query = "6\n".to_owned();
+    for p in [3, 11, 17] {
+        for (name, g) in [
+            ("paley_graph", paley_graph(p, GraphKind::Directed).unwrap()),
+            ("chordal_cycle_graph", chordal_cycle_graph(p).unwrap()),
+        ] {
+            query.push_str("G\n");
+            oracle::graph(&mut query, &g, |_| 1.0);
+            writeln!(query, "{name} 1 {p}").unwrap();
+        }
+    }
+    let (version, output) = oracle::invoke("1", &query);
+    assert_eq!(output.len(), 6);
+    assert!(output.iter().all(|row| row[1] == "1"));
+    println!("NetworkX {version}, six Paley and chordal-cycle comparisons");
 }

@@ -1,4 +1,7 @@
-//! Louvain community detection and weighted modularity.
+//! Louvain, Leiden, label propagation and weighted modularity.
+
+mod leiden;
+pub use leiden::{LeidenOptions, LeidenResult, leiden_communities, leiden_communities_by};
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -62,6 +65,8 @@ impl LouvainResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum CommunityError {
+    RequiresUndirected,
+    InvalidTemperature,
     InvalidResolution,
     InvalidThreshold,
     InvalidLevelLimit,
@@ -72,6 +77,10 @@ pub enum CommunityError {
 impl fmt::Display for CommunityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RequiresUndirected => f.write_str("Leiden requires an undirected graph"),
+            Self::InvalidTemperature => {
+                f.write_str("refinement temperature must be finite and positive")
+            }
             Self::InvalidResolution => f.write_str("resolution must be finite and positive"),
             Self::InvalidThreshold => f.write_str("threshold must be finite and nonnegative"),
             Self::InvalidLevelLimit => f.write_str("the level limit must be positive"),
@@ -389,4 +398,54 @@ impl Level {
         }
         Self::new(builder.build())
     }
+}
+
+/// Asynchronous unweighted label propagation on an undirected graph. Each
+/// parallel edge casts one vote; loops are ignored. Keeping the current label
+/// on ties makes each change strictly increase the number of agreeing edges.
+pub fn label_propagation_communities<W>(
+    graph: &Graph<W>,
+    seed: u64,
+) -> Result<Vec<usize>, crate::GraphError> {
+    graph.require(crate::GraphKind::Undirected)?;
+    let n = graph.node_count();
+    let mut order: Vec<_> = graph.nodes().collect();
+    let mut labels = order.clone();
+    let mut votes = vec![0; n];
+    let mut used = Vec::new();
+    Random(seed).shuffle(&mut order);
+    let mut active = std::collections::VecDeque::from(order);
+    let mut queued = vec![true; n];
+    while let Some(u) = active.pop_front() {
+        queued[u] = false;
+        for arc in graph.out(u).iter().filter(|a| a.node != u) {
+            let label = labels[arc.node];
+            if votes[label] == 0 {
+                used.push(label);
+            }
+            votes[label] += 1;
+        }
+        let mut best = labels[u];
+        for &label in &used {
+            if votes[label] > votes[best] {
+                best = label;
+            }
+        }
+        for label in used.drain(..) {
+            votes[label] = 0;
+        }
+        if best == labels[u] {
+            continue;
+        }
+        labels[u] = best;
+        // Only neighbors with a different label can be destabilized.
+        for arc in graph.out(u) {
+            if labels[arc.node] != best && !queued[arc.node] {
+                queued[arc.node] = true;
+                active.push_back(arc.node);
+            }
+        }
+    }
+    compact(&mut labels);
+    Ok(labels)
 }

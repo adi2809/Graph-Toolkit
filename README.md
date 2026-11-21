@@ -26,22 +26,23 @@ assert_eq!(&path.edges[..2], &[first, second]);
 
 | Module | Algorithms and data structures |
 | --- | --- |
-| `traversal` | Insertion-ordered BFS and iterative DFS. Multi-source BFS returns a shortest-path forest with source ownership. |
-| `grid` | Implicit grids with bit-packed obstacles, four- or eight-way movement, multi-source distance fields, and A*. |
-| `shortest_path` | Indexed-radix Dijkstra, bidirectional Dijkstra, A*, ALT, 0–1 BFS, signed Bellman–Ford, Duong’s local padded solver, Johnson, blocked Floyd–Warshall, indexed DAG routing, minimax paths, and k-shortest simple paths. |
-| `matching` | Edmonds and Gabow cardinality matching, exact weighted blossom, bottleneck matching, sparse bipartite assignment, edge covers, and validation. Deterministic and seeded Hopcroft–Karp also return minimum vertex covers. |
-| `flow` | Push–relabel, Dinic, Edmonds–Karp, Boykov–Kolmogorov, cost scaling, network simplex, cycle canceling, successive shortest paths, Stoer–Wagner, and Gomory–Hu. |
-| `multicommodity` | Maximum concurrent fractional flow for directed graphs. A sparse LP optimizes the common demand multiplier and returns a capacity- and conservation-checked allocation. |
-| `connectivity` | Union–find, offline dynamic connectivity, components, edge cuts, dominators, Eulerian traversals, cycle bases, core numbers, DAG ordering and reduction, spanning trees and forests, and bottleneck arborescences. |
-| `centrality` | Weighted personalized PageRank, degree, harmonic, closeness, and unweighted Brandes betweenness. |
-| `clustering` | Degree-oriented triangle enumeration, clustering coefficients, transitivity, and k-truss. |
+| `traversal` | Insertion-ordered BFS, direction-optimizing BFS, and iterative DFS. Multi-source BFS returns a shortest-path forest with source ownership. |
+| `grid` | Implicit grids with bit-packed obstacles, four- or eight-way movement, multi-source distance fields, A*, and four-way jump-point search. |
+| `shortest_path` | Indexed-radix and Fibonacci-heap Dijkstra, bidirectional Dijkstra, A*, ALT, 0–1 BFS, signed Bellman–Ford, Duong’s local padded solver, Johnson, blocked Floyd–Warshall, indexed DAG routing, minimax paths, and k-shortest simple paths. |
+| `matching` | Edmonds and Gabow cardinality matching, exact weighted blossom, bottleneck matching, sparse bipartite assignment, edge covers, and validation. Kuhn, Hopcroft–Karp, and seeded loop-erased random walks return minimum vertex covers. |
+| `flow` | Ford–Fulkerson, capacity scaling, push–relabel, Dinic, dynamic-tree blocking flow, cofacial planar flow, dynamic signed cycle hierarchies, terminal core cycles with exact dyadic recovery, Edmonds–Karp, Boykov–Kolmogorov, cost and capacity scaling for transshipment, network simplex, minimum-ratio cycles, cycle canceling, successive shortest paths, Stoer–Wagner, and Gomory–Hu. |
+| `multicommodity` | Maximum concurrent fractional flow for directed graphs. Path packing returns a feasible allocation and a dual upper bound. The optional sparse LP optimizes the common demand multiplier. |
+| `connectivity` | Interval and chain reachability indexes, union–find, offline dynamic connectivity, components, chordal recognition with a maximum clique and minimum coloring, edge cuts, dominators, Eulerian traversals, cycle bases, core numbers, DAG ordering and reduction, Kruskal and randomized filtered spanning forests, low-stretch spanning forests, uniform random spanning forests, and bottleneck arborescences. |
+| `centrality` | Weighted personalized PageRank, degree, harmonic, closeness, and exact or pivot-sampled unweighted Brandes betweenness. |
+| `clustering` | Degree-oriented triangle enumeration, clustering coefficients, transitivity, sampled mean local clustering, and k-truss. |
 | `functions` | CSR graph inspection, typed attribute maps, and stable-ID borrowed subgraphs. |
-| `planarity` | Linear-time left–right testing, rotation systems, and face boundaries. |
-| `isomorphism` | VF2++ directed and undirected multigraph isomorphism, optional node labels, and lazy enumeration of mappings. |
-| `community` | Seeded weighted Louvain community detection and modularity for directed and undirected graphs. |
-| `generators` | Classical and named graphs, triangular and hexagonal lattices, expanders, graph lifts, and seeded random network models. |
+| `planarity` | Linear-time left–right testing, rotation systems, face boundaries, and Kuratowski subdivisions. |
+| `isomorphism` | VF2++ whole-graph and vertex-induced subgraph isomorphism, optional node labels, and lazy enumeration of mappings. |
+| `community` | Active-queue label propagation, weighted undirected Leiden, and weighted Louvain and modularity for both graph kinds. |
+| `generators` | Classical and named graphs, triangular and hexagonal lattices, expanders, graph lifts, algebraic graphs, tournaments, seeded random network models, bipartite regular multigraphs, and binomial intersection graphs. |
+| `structures` | Union–find, rollback union–find, link–cut forests with path minima and path updates, indexed Fibonacci heaps and radix queues, bounded-arity trees, segment trees, static range minima, and Fenwick frequency trees. |
 
-Nonnegative routing uses `u64` edge weights and `u128` distances. Signed routing uses `i64` weights and `i128` distances. Single-commodity capacities are `u64`, with `u128` flow and cut aggregates. The randomized bipartite solver uses its seed to choose the greedy warm start and then runs exact augmenting phases. Fractional multicommodity flow uses floating point and can report numerical accuracy failures for ill-conditioned inputs.
+Nonnegative routing uses `u64` edge weights and `u128` distances. Signed routing uses `i64` weights and `i128` distances. Single-commodity capacities are `u64`, with `u128` flow and cut aggregates. `randomized_maximum_matching` randomizes the Hopcroft–Karp warm start. `random_walk_maximum_matching` finds alternating paths by loop-erased random walks and uses a bounded retry policy on arbitrary inputs. Fractional multicommodity flow uses floating point and can report numerical accuracy failures for ill-conditioned inputs.
 
 The library requires Rust 1.86 or newer. The default `multicommodity` feature uses the pure-Rust [microlp solver](https://docs.rs/microlp/0.8.0/microlp/). Build with `--no-default-features` for a standard-library-only crate.
 
@@ -49,6 +50,55 @@ The library requires Rust 1.86 or newer. The default `multicommodity` feature us
 cargo test --locked
 cargo test --locked --no-default-features
 ```
+
+## Flow solver selection
+
+For an exact directed maximum flow, `flow::max_flow` runs highest-label push–relabel. `max_flow_st_planar` uses a dual shortest-path computation when the terminals can share a face. `max_flow_core_cycles` maintains routes through contracted forests, then recovers an integer flow and a minimum cut. `max_flow_tree_cycle` can first run signed barrier descent with `TreeCycleBasis::DynamicHierarchy`, then continue from that flow through the same exact solver. Both use only the standard library. The general almost-linear running-time bound remains open in this implementation. [Sparse and dense benchmarks](benches/flow.md)
+
+For repeated minimum-ratio-cycle queries on an undirected graph with signed integer costs and positive lengths, build an `EmbeddedCycleHierarchy` and apply batches with `update`. The inexpensive `improving_cycle` returns an embedded witness. Use `certified_cycle(factor)` for a global guarantee, or `certified_cycle(1)` for the exact minimum improving ratio.
+
+For supplies with signed arc costs, `minimum_cost_flow_capacity_scaling` works through successively finer capacity thresholds. `minimum_cost_flow_minimum_mean_cycle` repeatedly cancels a residual cycle of minimum mean cost. Both accept positive supplies at senders, negative supplies at receivers, and zero supplies for minimum-cost circulation. An infeasible balance vector returns `Ok(None)`. Use `minimum_cost_flow_with_lower_bounds` when some edges must carry a minimum amount.
+
+```rust
+use graph_library::{Graph, GraphKind};
+use graph_library::flow::{ArcCost, minimum_cost_flow_capacity_scaling};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let mut network = Graph::builder(2, GraphKind::Directed);
+network.add_edge(0, 1, ArcCost { capacity: 5, unit_cost: -2 })?;
+let optimum = minimum_cost_flow_capacity_scaling(&network.build(), &[3, -3])?.unwrap();
+assert_eq!(optimum.edge_flows, [3]);
+assert_eq!(optimum.total_cost, -6);
+# Ok(())
+# }
+```
+
+## Choosing a solver or query index
+
+For integral max flow, `max_flow_capacity_scaling` handles a large spread of capacities through thresholded residual searches. Plain `max_flow_ford_fulkerson` can take one augmentation per unit of flow. `max_flow_network_simplex` converts max flow to a zero-supply circulation and returns the same per-edge flows and minimum-cut certificate as the other max-flow APIs. Use `network_simplex` directly for supplies and costs.
+
+For many connectivity queries on one snapshot, build weak or strong components once and query their labels in O(1). For one-way reachability, `ReachabilityIndex` uses linear space at fixed dimension and searches only when its intervals leave a query unresolved. `ChainReachabilityIndex` offers O(1) queries when the condensation has a small path cover. Its constructor accepts a byte budget for the label table. For undirected queries under a changing edge-weight limit, `ThresholdConnectivityIndex` answers in O(1) after Kruskal preprocessing.
+
+```rust
+use graph_library::{Graph, GraphKind};
+use graph_library::connectivity::{ChainReachabilityIndex, ReachabilityIndex};
+
+# fn main() -> Result<(), graph_library::GraphError> {
+let mut b = Graph::builder(5, GraphKind::Directed);
+b.add_path(&[0, 1, 2, 3], ())?;
+b.add_edge(2, 1, ())?;
+let g = b.build();
+let intervals = ReachabilityIndex::new(&g, 3, 42);
+assert!(intervals.reachable(0, 3)?);
+assert!(!intervals.reachable(3, 0)?);
+let chains = ChainReachabilityIndex::with_budget(&g, 4096).unwrap();
+assert!(chains.reachable(2, 1)?);
+assert!(!chains.reachable(0, 4)?);
+# Ok(())
+# }
+```
+
+The [algorithm survey](docs/algorithm-survey.md) covers implementation provenance, primary sources, method selection, and the workload measurements for these indexes.
 
 ## Signed paths and bottleneck objectives
 
@@ -91,7 +141,7 @@ cargo bench --locked --no-default-features --bench general_matching
 
 `maximum_weight_matching(graph, false)` optimizes total weight. Pass `true` to maximize cardinality first. `minimum_cost_matching` minimizes the cost of a maximum-cardinality matching. `minimum_cost_perfect_matching` requires every vertex to be matched and returns `None` when this is infeasible. The specialized bipartite functions use a supplied partition and can require the smaller side to be fully matched.
 
-Weights are signed `i64`, and totals use `i128`. The engines preserve original edge IDs, including when parallel edges have different weights. General weighted matching uses a primal–dual blossom algorithm with O(V³ + E) worst-case time after coalescing parallel edges, solves independent components separately, and uses the Gabow matcher for uniform-weight components.
+Weights are signed `i64`, and totals use `i128`. The engines preserve original edge IDs, including when parallel edges have different weights. General weighted matching coalesces parallel edges, solves each component independently, and uses Gabow for uniform weights. The primal–dual solver records cyclic edges in contracted blossoms and opens them when their dual reaches zero or the solution is extracted. Its event queue stores predicted tight edges.
 
 ```rust
 use graph_library::{Graph, GraphKind};
@@ -117,6 +167,10 @@ The [weighted benchmark](benches/weighted_matching.md) compares all three object
 
 `check_planarity` returns the clockwise order of original edge IDs and the face boundary walks of the underlying simple undirected graph. `is_planar` skips embedding construction. `vf2pp_isomorphism` returns a left-to-right vertex bijection and accounts for edge direction, loops, and parallel edges. Optional labels and all-mapping iteration are available.
 
+For a nonplanar graph, `kuratowski_witness` returns internally disjoint paths forming a subdivision of K₅ or K₃,₃, expressed with original vertex and edge IDs. `check_planarity_with_witness` returns either an embedding or such a subdivision. Extraction isolates a biconnected block, suppresses degree-two chains, and removes dispensable edges in batches. The resulting subdivision is inclusion-minimal.
+
+`vf2pp_subgraph_isomorphism(host, pattern)` returns a vector from pattern vertices to host vertices. It preserves every edge and nonedge inside the image, including direction, loops, and multiplicity. Host edges leaving the image are unrestricted. Labelled and lazy all-mapping variants are available.
+
 Louvain accepts finite, nonnegative weights. Its result contains original-vertex community IDs and the modularity at each aggregation level. The seed controls vertex order, so different seeds and implementations may find different partitions.
 
 ```rust
@@ -137,7 +191,7 @@ assert_eq!(result.community_count(), 3);
 # }
 ```
 
-See the [network structure benchmark](benches/network_structure.md) for sparse, dense, and adversarial inputs and the NetworkX comparisons.
+The [network structure benchmark](benches/network_structure.md) covers planarity, whole-graph VF2++, and Louvain. The [witness and induced-match benchmark](benches/obstructions.md) compares Kuratowski extraction and induced matching on sparse, dense, and adversarial inputs.
 
 ## Algorithm references
 

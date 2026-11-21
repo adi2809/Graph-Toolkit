@@ -151,8 +151,10 @@ pub fn min_cost_max_flow(
     })
 }
 
-/// Computes cost for given edge flows. Checks length and capacities.
-pub fn flow_cost(graph: &Graph<ArcCost>, amounts: &[u64]) -> Result<i128, CostFlowError> {
+pub(super) fn validate_amounts(
+    graph: &Graph<ArcCost>,
+    amounts: &[u64],
+) -> Result<(), CostFlowError> {
     if amounts.len() != graph.edge_count() {
         return Err(CostFlowError::EdgeFlowCount {
             expected: graph.edge_count(),
@@ -165,6 +167,12 @@ pub fn flow_cost(graph: &Graph<ArcCost>, amounts: &[u64]) -> Result<i128, CostFl
         }
     }
 
+    Ok(())
+}
+
+/// Computes cost for given edge flows. Checks length and capacities.
+pub fn flow_cost(graph: &Graph<ArcCost>, amounts: &[u64]) -> Result<i128, CostFlowError> {
+    validate_amounts(graph, amounts)?;
     // Consume an opposite-sign term when available, so cancellation cannot
     // overflow merely because many same-sign edges were inserted first.
     let terms = amounts

@@ -174,3 +174,40 @@ impl SimpleTopology {
         result
     }
 }
+
+/// Estimates the mean local clustering coefficient, counting degree-zero and
+/// degree-one vertices as zero. Each trial samples one uniform vertex and two
+/// distinct neighbors. After simple projection, a trial takes O(log V) time.
+pub fn sampled_average_clustering<W>(
+    graph: &Graph<W>,
+    samples: usize,
+    seed: u64,
+) -> Result<f64, GraphError> {
+    graph.require(GraphKind::Undirected)?;
+    if samples == 0 {
+        return Err(GraphError::InvalidModelParameters);
+    }
+    let topology = SimpleTopology::new(graph)?;
+    if topology.rows.is_empty() {
+        return Ok(0.0);
+    }
+    let mut rng = crate::random::Random(seed);
+    let mut closed = 0;
+    for _ in 0..samples {
+        let row = &topology.rows[rng.below(topology.rows.len())];
+        if row.len() < 2 {
+            continue;
+        }
+        let i = rng.below(row.len());
+        let j = rng.below(row.len() - 1);
+        let a = row[i].0;
+        let b = row[j + usize::from(j >= i)].0;
+        if topology.rows[a]
+            .binary_search_by_key(&b, |entry| entry.0)
+            .is_ok()
+        {
+            closed += 1usize;
+        }
+    }
+    Ok(closed as f64 / samples as f64)
+}

@@ -8,6 +8,7 @@ use crate::Graph;
 mod distance;
 pub use distance::{
     betweenness_centrality, closeness_centrality, degree_centrality, harmonic_centrality,
+    sampled_betweenness_centrality,
 };
 
 /// Options for weighted, personalized PageRank.

@@ -149,7 +149,34 @@ impl<K: Copy + Ord> IndexedHeap<K> {
         if let Some(&(_, node)) = self.keys.first() {
             self.position[node] = 0;
         }
-        let mut index = 0;
+        self.sift_down(0);
+        Some(entry)
+    }
+
+    pub(crate) fn peek(&self) -> Option<(K, usize)> {
+        self.keys.first().copied()
+    }
+
+    /// Rebuilds from unique IDs in linear time.
+    pub(crate) fn rebuild(&mut self, entries: Vec<(K, usize)>) {
+        self.clear();
+        self.keys = entries;
+        for (position, &(_, id)) in self.keys.iter().enumerate() {
+            self.position[id] = position;
+        }
+        for index in (0..self.keys.len().div_ceil(4)).rev() {
+            self.sift_down(index);
+        }
+    }
+
+    pub(crate) fn offer(&mut self, id: usize, key: K) {
+        let pos = self.position[id];
+        if pos == NONE || self.keys[pos].0 > key {
+            self.decrease(id, key);
+        }
+    }
+
+    fn sift_down(&mut self, mut index: usize) {
         while index * 4 + 1 < self.keys.len() {
             let start = index * 4 + 1;
             let end = (start + 4).min(self.keys.len());
@@ -160,12 +187,66 @@ impl<K: Copy + Ord> IndexedHeap<K> {
             self.swap(index, child);
             index = child;
         }
-        Some(entry)
     }
 
     fn swap(&mut self, a: usize, b: usize) {
         self.keys.swap(a, b);
         self.position[self.keys[a].1] = a;
         self.position[self.keys[b].1] = b;
+    }
+}
+
+/// Indexed monotone priority queue with the full u128 key range. Insertions
+/// and decreases must respect the last extracted minimum. Equal keys are allowed.
+pub struct RadixQueue {
+    heap: RadixHeap,
+    keys: Vec<u128>,
+    present: Vec<bool>,
+    len: usize,
+}
+impl RadixQueue {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            heap: RadixHeap::new(capacity),
+            keys: vec![0; capacity],
+            present: vec![false; capacity],
+            len: 0,
+        }
+    }
+    /// Returns false for an invalid ID, a key below the floor, or a
+    /// non-decreasing update to an existing ID. Rejection preserves the queue.
+    pub fn decrease(&mut self, id: usize, key: u128) -> bool {
+        if id >= self.keys.len() || key < self.heap.last {
+            return false;
+        }
+        if self.present[id] {
+            if key >= self.keys[id] {
+                return false;
+            }
+            self.heap.unlink(self.heap.bucket(self.keys[id]), id);
+        } else {
+            self.present[id] = true;
+            self.len += 1;
+        }
+        self.heap.insert(self.heap.bucket(key), id);
+        self.keys[id] = key;
+        true
+    }
+    pub fn pop(&mut self) -> Option<(u128, usize)> {
+        let result = self.heap.pop(&self.keys)?;
+        self.present[result.1] = false;
+        self.len -= 1;
+        Some(result)
+    }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    pub fn clear(&mut self) {
+        self.heap.reset();
+        self.present.fill(false);
+        self.len = 0;
     }
 }

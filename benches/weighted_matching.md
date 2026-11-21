@@ -9,9 +9,25 @@ cargo test --locked --test weighted_matching -- --ignored --nocapture
 
 The benchmark builds the graphs before timing. Each Rust median uses seven runs, and each NetworkX median uses three. Both engines receive a warm-up run for each objective. Medians include each matching call and its result allocation. Serialization, graph construction, and result validation are outside the timed intervals. All 27 objective values agreed. Cardinalities also agreed for the two objectives that optimize cardinality first.
 
-The sparse family is a connected graph with 3V distinct edges. The dense family has roughly two thirds of the possible edges. Both use weights from −1,000 to 1,000. The worst-case family is a complete graph with two ladders of disjoint, distinctly weighted edges and unit-weight background edges. One ladder is strongly positive and the other strongly negative. Each ladder forces a linear number of separate augmentations for its favored objective, while the remaining free vertices still have quadratic-size adjacency to scan. This exercises cubic work in the weighted blossom implementation.
+The sparse family is a connected graph with 3V distinct edges. The dense family has roughly two thirds of the possible edges. Both use weights from −1,000 to 1,000. The worst-case family is a complete graph with two ladders of disjoint, distinctly weighted edges and unit-weight background edges. One ladder is strongly positive and the other strongly negative. Each ladder forces a linear number of separate augmentations for its favored objective, while the remaining free vertices still have quadratic-size adjacency to scan. This stresses repeated augmentation on a dense graph.
 
-## Measured medians
+## Independent solver
+
+The replacement solver uses a primal–dual quotient graph and an indexed event heap. The table gives seven-run Rust medians from November 20, 2026 on the same fixtures. The earlier implementation was faster on these fixtures. For example, dense 256-vertex cardinality-first matching rose from 18.743 ms to 44.061 ms. The exhaustive objective tests and optional Python comparison cover the replacement independently.
+
+| Family | Vertices | Maximum weight (ms) | Cardinality first (ms) | Minimum cost (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| sparse | 128 | 0.599 | 0.947 | 0.981 |
+| sparse | 256 | 2.109 | 3.456 | 4.058 |
+| sparse | 512 | 9.391 | 12.963 | 12.962 |
+| dense | 64 | 0.750 | 1.435 | 1.338 |
+| dense | 128 | 4.671 | 8.677 | 7.989 |
+| dense | 256 | 23.497 | 44.061 | 39.767 |
+| worst-case ladders | 64 | 0.888 | 0.888 | 0.899 |
+| worst-case ladders | 128 | 6.164 | 6.198 | 6.308 |
+| worst-case ladders | 256 | 46.633 | 46.732 | 48.301 |
+
+## Historical measurements before replacement
 
 Rust 1.100.0 and Python 3.9.6 with NetworkX 3.2.1 on arm64 macOS 27.0.1. All times are in milliseconds. Each cell lists Rust / NetworkX.
 

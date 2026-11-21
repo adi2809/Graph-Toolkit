@@ -69,6 +69,44 @@ fn distance_centrality<W>(graph: &Graph<W>, score: impl Fn(usize, u128, f64) -> 
 /// and O(V + E) space. Paths that use different parallel edges are counted
 /// separately. Endpoints never contribute to their own betweenness.
 pub fn betweenness_centrality<W>(graph: &Graph<W>, normalized: bool) -> Vec<f64> {
+    betweenness_from(graph, normalized, graph.nodes(), 1.0)
+}
+
+/// Unbiased pivot-sampling estimate of unweighted vertex betweenness. Each
+/// sampled source contributes its exact Brandes dependencies. Selecting every
+/// vertex delegates to exact centrality. A nonempty graph requires 1..=V pivots.
+pub fn sampled_betweenness_centrality<W>(
+    graph: &Graph<W>,
+    normalized: bool,
+    pivots: usize,
+    seed: u64,
+) -> Result<Vec<f64>, crate::GraphError> {
+    let n = graph.node_count();
+    if pivots == n {
+        return Ok(betweenness_centrality(graph, normalized));
+    }
+    if pivots == 0 || pivots > n {
+        return Err(crate::GraphError::InvalidModelParameters);
+    }
+    let mut sources: Vec<_> = graph.nodes().collect();
+    let mut rng = crate::random::Random(seed);
+    for i in 0..pivots {
+        sources.swap(i, i + rng.below(n - i));
+    }
+    Ok(betweenness_from(
+        graph,
+        normalized,
+        sources.into_iter().take(pivots),
+        n as f64 / pivots as f64,
+    ))
+}
+
+fn betweenness_from<W>(
+    graph: &Graph<W>,
+    normalized: bool,
+    sources: impl Iterator<Item = usize>,
+    multiplier: f64,
+) -> Vec<f64> {
     let n = graph.node_count();
     let mut result = vec![0.0; n];
     if n < 3 {
@@ -79,7 +117,7 @@ pub fn betweenness_centrality<W>(graph: &Graph<W>, normalized: bool) -> Vec<f64>
     let mut count = vec![PathCount::ZERO; n];
     let mut dependency = vec![0.0; n];
     let mut queue = Vec::new();
-    for source in graph.nodes() {
+    for source in sources {
         queue.clear();
         queue.push(source);
         stamp[source] = source;
@@ -131,7 +169,7 @@ pub fn betweenness_centrality<W>(graph: &Graph<W>, normalized: bool) -> Vec<f64>
         0.5
     };
     for value in &mut result {
-        *value *= scale;
+        *value *= scale * multiplier;
     }
     result
 }

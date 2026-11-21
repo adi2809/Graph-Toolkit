@@ -1,8 +1,12 @@
-//! Maximum concurrent fractional flow using a sparse edge-based linear program.
+//! Maximum concurrent fractional flow via path packing or a sparse linear program.
+
+mod packing;
+pub use packing::{ConcurrentFlowBounds, approximate_concurrent_flow};
 
 use std::error::Error;
 use std::fmt;
 
+#[cfg(feature = "multicommodity")]
 use microlp::{
     ComparisonOp, LinearExpr, OptimizationDirection, Problem, SolutionStatus, SolveOptions,
     SolveOutcome, Variable,
@@ -10,6 +14,7 @@ use microlp::{
 
 use crate::{EdgeId, Graph, GraphError, GraphKind, NodeId};
 
+#[cfg(feature = "multicommodity")]
 const SOLVER_TOLERANCE: f64 = 1e-10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,7 +43,11 @@ pub struct ConcurrentFlow {
 pub enum ConcurrentFlowError {
     Graph(GraphError),
     NoCommodities,
-    ZeroDemand { commodity: usize },
+    ZeroDemand {
+        commodity: usize,
+    },
+    InvalidApproximationParameters,
+    #[cfg(feature = "multicommodity")]
     Solver(microlp::Error),
     NumericalAccuracy,
 }
@@ -49,6 +58,10 @@ impl fmt::Display for ConcurrentFlowError {
             Self::Graph(error) => error.fmt(f),
             Self::NoCommodities => f.write_str("at least one commodity is required"),
             Self::ZeroDemand { commodity } => write!(f, "commodity {commodity} has zero demand"),
+            Self::InvalidApproximationParameters => {
+                f.write_str("expected a relative gap in (0, 1) and a positive round limit")
+            }
+            #[cfg(feature = "multicommodity")]
             Self::Solver(error) => write!(f, "linear programming solver failed: {error}"),
             Self::NumericalAccuracy => {
                 f.write_str("the solver did not produce a numerically valid optimum")
@@ -61,6 +74,7 @@ impl Error for ConcurrentFlowError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Graph(error) => Some(error),
+            #[cfg(feature = "multicommodity")]
             Self::Solver(error) => Some(error),
             _ => None,
         }
@@ -73,14 +87,10 @@ impl From<GraphError> for ConcurrentFlowError {
     }
 }
 
-/// Maximizes the common demand multiplier subject to shared directed capacities.
-/// Traffic may split across paths. Supplies, capacities, and the solution are
-/// modeled in floating point. Results are checked for feasibility to a relative
-/// tolerance of 1e-7. Ill-conditioned models may return a solver or accuracy error.
-pub fn maximum_concurrent_flow(
+fn validate_commodities(
     graph: &Graph<u64>,
     commodities: &[Commodity],
-) -> Result<ConcurrentFlow, ConcurrentFlowError> {
+) -> Result<u64, ConcurrentFlowError> {
     graph.require(GraphKind::Directed)?;
     if commodities.is_empty() {
         return Err(ConcurrentFlowError::NoCommodities);
@@ -96,6 +106,57 @@ pub fn maximum_concurrent_flow(
             return Err(ConcurrentFlowError::ZeroDemand { commodity: index });
         }
         largest_demand = largest_demand.max(commodity.demand);
+    }
+
+    Ok(largest_demand)
+}
+
+/// Maximizes the common demand multiplier subject to shared directed capacities.
+/// Traffic may split across paths. Supplies, capacities, and the solution are
+/// modeled in floating point. Results are checked for feasibility to a relative
+/// tolerance of 1e-7. Ill-conditioned models may return a solver or accuracy error.
+#[cfg(feature = "multicommodity")]
+pub fn maximum_concurrent_flow(
+    graph: &Graph<u64>,
+    commodities: &[Commodity],
+) -> Result<ConcurrentFlow, ConcurrentFlowError> {
+    let largest_demand = validate_commodities(graph, commodities)?;
+
+    // With one terminal pair, proportional decomposition of a maximum flow
+    // meets every demand at the optimal common multiplier.
+    let first = commodities[0];
+    if commodities
+        .iter()
+        .all(|c| (c.source, c.sink) == (first.source, first.sink))
+    {
+        let flow = crate::flow::max_flow(graph, first.source, first.sink)?;
+        let demand = commodities
+            .iter()
+            .map(|c| u128::from(c.demand))
+            .sum::<u128>() as f64;
+        let used: Vec<_> = flow
+            .edge_flows
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, amount)| amount != 0)
+            .collect();
+        let result = ConcurrentFlow {
+            fraction: flow.value as f64 / demand,
+            commodity_flows: commodities
+                .iter()
+                .map(|c| {
+                    let share = c.demand as f64 / demand;
+                    used.iter()
+                        .map(|&(edge, amount)| FractionalEdgeFlow {
+                            edge,
+                            amount: amount as f64 * share,
+                        })
+                        .collect()
+                })
+                .collect(),
+        };
+        verify(graph, commodities, &result)?;
+        return Ok(result);
     }
 
     let demand_scale = largest_demand as f64;
@@ -186,6 +247,7 @@ pub fn maximum_concurrent_flow(
     Ok(result)
 }
 
+#[cfg(feature = "multicommodity")]
 fn reachable(
     graph: &Graph<u64>,
     start: NodeId,
@@ -214,6 +276,7 @@ fn reachable(
     }
 }
 
+#[cfg(feature = "multicommodity")]
 fn add_balance_rows(
     problem: &mut Problem,
     graph: &Graph<u64>,
